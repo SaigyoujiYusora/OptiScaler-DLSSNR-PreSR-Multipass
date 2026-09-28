@@ -19,7 +19,7 @@ The version/hash/size gate and fixed import offset were already removed in v0.8.
 - The four-retired-generation limit pauses further allocation while old DLSS GPU work remains outstanding; it resumes after collection. Removing it would restore unbounded allocation during repeated reconfiguration.
 - Actual model creation/evaluation errors stop that context until Retry; they are runtime results, not file-version exclusions. Exposure/capture budgets limit inspection work and do not block model loading.
 - NR exports and parseable import tables remain necessary. Differing wrappers for duplicate imports of the same API remain an explicit unsupported case; the backend cannot preserve multiple distinct chains with one adapter.
-- Native Vulkan still uses its driver path. Optional MFG instruction-patch signatures remain necessary to locate actual patch sites; they are separate from NR loading.
+- Native Vulkan first uses its driver path and can fall back to the direct runtime after creation fails without a handle. Optional MFG instruction-patch signatures remain necessary to locate actual patch sites; they are separate from NR loading.
 
 ## Validation
 

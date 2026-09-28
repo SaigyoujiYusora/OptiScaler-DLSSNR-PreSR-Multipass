@@ -24,7 +24,7 @@ $cmd = @"
 call "$VcVars" >nul
 if errorlevel 1 exit /b 1
 cd /d "$repo"
-cl /nologo /std:c++20 /EHsc /O2 /MD /W4 /FI"$repo/tests/nr_compatibility/Adapter.h" /I"$build" /I"$repo/external/nvngx_dlss_sdk" /I"$repo/OptiScaler" "$PSScriptRoot/spatial_benchmark.cpp" "$repo/OptiScaler/dlssnr/DlssNr_CompatibilityRuntime.cpp" /Fo"$build/" /Fe:"$build/spatial_benchmark.exe" /link d3d12.lib dxgi.lib d3dcompiler.lib
+cl /nologo /std:c++20 /EHsc /O2 /MD /W4 /FI"$repo/tests/nr_compatibility/Adapter.h" /I"$build" /I"$repo/external/nvngx_dlss_sdk" /I"$repo/external/vulkan/include" /I"$repo/OptiScaler" "$PSScriptRoot/spatial_benchmark.cpp" "$repo/OptiScaler/dlssnr/DlssNr_CompatibilityRuntime.cpp" /Fo"$build/" /Fe:"$build/spatial_benchmark.exe" /link d3d12.lib dxgi.lib d3dcompiler.lib
 "@
 Set-Content -LiteralPath "$build/build.cmd" -Value $cmd
 & "$build/build.cmd"

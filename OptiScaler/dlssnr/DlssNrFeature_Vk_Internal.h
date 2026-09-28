@@ -6,6 +6,7 @@
 #include <shaders/dlssnr/DlssNr_Guides.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include "PassProfiles.h"
+#include "DlssNr_CompatibilityRuntime.h"
 #include <nvsdk_ngx_vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <mutex>
@@ -13,12 +14,13 @@
 namespace DlssNr
 {
 
-// Each layer has its own driver-created feature and capability parameter map.
+// Each layer has its own feature, creating backend and capability parameter map.
 // Sharing either would couple temporal histories when two passes use the same profile.
 struct NgxPassVk
 {
     NVSDK_NGX_Handle* feature = nullptr;
     NVSDK_NGX_Parameter* parameters = nullptr;
+    std::shared_ptr<CompatibilityRuntime> compatibility;
 };
 
 struct VkState
@@ -31,6 +33,8 @@ struct VkState
     VkDevice device = VK_NULL_HANDLE;
 
     bool ngxInitialised = false;
+    // Keep the direct backend alive across profile/size rebuilds. Shutdown drains the GPU first.
+    std::shared_ptr<CompatibilityRuntime> compatibility;
     NgxPassVk models[DlssNr::MaxPassCount] {};
     ModelSettings builtSettings[DlssNr::MaxPassCount] {};
     unsigned int activePasses = 0;

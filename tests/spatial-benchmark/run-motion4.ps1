@@ -21,7 +21,7 @@ $cmd = @"
 call "$VcVars" >nul
 if errorlevel 1 exit /b 1
 cd /d "$repo"
-cl /nologo /std:c++20 /EHsc /O2 /MD /W4 /FI"$repo/tests/nr_compatibility/Adapter.h" /I"$build" /I"$repo/external/nvngx_dlss_sdk" "$PSScriptRoot/motion4_probe.cpp" "$repo/OptiScaler/dlssnr/DlssNr_CompatibilityRuntime.cpp" /Fo"$build/" /Fe:"$build/motion4_probe.exe" /link d3d12.lib dxgi.lib
+cl /nologo /std:c++20 /EHsc /O2 /MD /W4 /FI"$repo/tests/nr_compatibility/Adapter.h" /I"$build" /I"$repo/external/nvngx_dlss_sdk" /I"$repo/external/vulkan/include" "$PSScriptRoot/motion4_probe.cpp" "$repo/OptiScaler/dlssnr/DlssNr_CompatibilityRuntime.cpp" /Fo"$build/" /Fe:"$build/motion4_probe.exe" /link d3d12.lib dxgi.lib
 "@
 Set-Content -LiteralPath "$build/build.cmd" -Value $cmd
 & "$build/build.cmd"

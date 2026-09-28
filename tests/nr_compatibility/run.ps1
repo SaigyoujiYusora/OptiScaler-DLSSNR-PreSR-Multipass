@@ -17,7 +17,7 @@ if ($LASTEXITCODE) { throw 'Import test compilation failed.' }
 & "$build/imports.exe"
 if ($LASTEXITCODE) { throw 'Import regression failed.' }
 & cl.exe /nologo /std:c++20 /EHsc /O2 /MD /W4 "/FI$PSScriptRoot/Adapter.h" "/I$build" `
-    "/I$repo/external/nvngx_dlss_sdk" "$PSScriptRoot/HardwareSmoke.cpp" `
+    "/I$repo/external/nvngx_dlss_sdk" "/I$repo/external/vulkan/include" "$PSScriptRoot/HardwareSmoke.cpp" `
     "$repo/OptiScaler/dlssnr/DlssNr_CompatibilityRuntime.cpp" "/Fo$build/" "/Fe:$build/smoke.exe" `
     /link d3d12.lib dxgi.lib
 if ($LASTEXITCODE) { throw 'Compatibility smoke compilation failed.' }

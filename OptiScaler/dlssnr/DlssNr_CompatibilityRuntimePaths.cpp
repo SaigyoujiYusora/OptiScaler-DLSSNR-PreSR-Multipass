@@ -29,4 +29,29 @@ std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::TryOpen(ID3D12Device
     LOG_INFO("NR compatibility: no supported direct runtime available; preserving driver failure");
     return {};
 }
+
+std::shared_ptr<CompatibilityRuntime>
+CompatibilityRuntime::TryOpenVulkan(VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device)
+{
+    std::vector<std::filesystem::path> paths;
+    for (const auto& path : State::Instance().NVNGX_FeatureInfo_Paths)
+        paths.emplace_back(path);
+    paths.push_back(Util::ExePath().parent_path());
+    paths.push_back(Util::DllPath().parent_path());
+    if (Config::Instance()->MainDllPath.has_value())
+        paths.emplace_back(Config::Instance()->MainDllPath.value());
+    std::set<std::wstring> visited;
+    for (const auto& path : paths)
+    {
+        if (!visited.insert(Util::ToLower(std::filesystem::absolute(path).lexically_normal().wstring())).second)
+            continue;
+        if (auto runtime =
+                OpenVulkan(path / L"nvngx_dlssnr.dll", instance, physicalDevice, device,
+                           NVNGXProxy::VULKAN_GetCapabilityParameters(), NVNGXProxy::VULKAN_DestroyParameters(),
+                           State::Instance().NVNGX_ApplicationDataPath))
+            return runtime;
+    }
+    LOG_INFO("NR compatibility: no supported direct Vulkan runtime available; preserving driver failure");
+    return {};
+}
 } // namespace DlssNr
