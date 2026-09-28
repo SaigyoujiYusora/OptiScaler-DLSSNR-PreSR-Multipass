@@ -3311,6 +3311,32 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     auto& menuResScale = ctx.menuResScale;
     auto& primaryGpu = *ctx.primaryGpu;
 
+    if (StreamlineHooks::IsNativeVulkanDlssg())
+    {
+        const auto nativeFg = StreamlineHooks::GetNativeVulkanDlssgStatus();
+        ImGui::SeparatorText("Frame Generation (Game native)");
+        ImGui::TextUnformatted("DLSSG uses the game's Vulkan pipeline.");
+        ImGui::TextWrapped("Enable DLSS Frame Generation in the game's settings.");
+        if (!nativeFg.optionsSeen)
+            ImGui::TextDisabled("Waiting for the game's DLSSG request.");
+        else if (nativeFg.requested)
+        {
+            ImGui::TextUnformatted("Game request: Enabled");
+            ImGui::TextWrapped("Temporarily paused while this menu is open. Close it to resume.");
+            ImGui::TextDisabled("OptiScaler FPS and notification overlays are hidden during native FG.");
+        }
+        else
+            ImGui::TextUnformatted("Game request: Disabled");
+        if (nativeFg.lastResult.has_value() && nativeFg.lastResult.value() != 0)
+            ImGui::TextWrapped("Native DLSSG returned error %u. See OptiScaler.log.", nativeFg.lastResult.value());
+        state.fgSettingsChanged = false;
+        return;
+    }
+
+    if (state.swapchainApi == API::Vulkan && state.activeFgNvngx != FGNvngxReplacement::None)
+        ImGui::TextWrapped("An FG replacement is selected. For game-native Vulkan DLSSG, set FG Input and Output "
+                           "to None, save settings and restart.");
+
 #if defined(OPTISCALER_RTX40_MFG)
     const bool adaEnabledForSession = MfgUnlock::EnabledForSession();
     bool adaUnlock = config->FGDLSSGAdaMfgUnlock.value_or_default();
@@ -3908,6 +3934,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
 void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 {
+    // The game owns native Vulkan FG; the replacement backend controls below do not apply.
+    if (StreamlineHooks::IsNativeVulkanDlssg())
+        return;
     auto& state = ctx.state;
     auto config = ctx.config;
     auto& currentFeature = ctx.currentFeature;

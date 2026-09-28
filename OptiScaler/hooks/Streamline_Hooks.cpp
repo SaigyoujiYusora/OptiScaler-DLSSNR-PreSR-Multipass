@@ -22,6 +22,26 @@
 #include <magic_enum.hpp>
 #include "detours/detours.h"
 
+namespace
+{
+size_t DlssgOptionsSize(uint32_t structVersion)
+{
+    switch (structVersion)
+    {
+    case 1:
+        return 104;
+    case 2:
+    case 3:
+        return 112;
+    case 4:
+    case 5:
+        return 120;
+    default:
+        return 0;
+    }
+}
+} // namespace
+
 static bool IsSL1AndDLSSGActive()
 {
     return State::Instance().streamlineVersion.major == 1 && State::Instance().activeFgInput == FGInput::DLSSG &&
@@ -120,6 +140,21 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     // renderAPI is optional so need to be careful, should only matter for Vulkan
     renderApi = localPref.renderAPI;
 
+    {
+        std::lock_guard lock(dlssgOptionsMutex);
+        auto& state = State::Instance();
+        state.nativeVulkanDlssg =
+            localPref.renderAPI == sl::RenderAPI::eVulkan && state.activeFgNvngx == FGNvngxReplacement::None;
+        state.nativeVulkanDlssgOptionsSeen = false;
+        state.nativeVulkanDlssgRequested = false;
+        state.nativeVulkanDlssgLastResult.reset();
+        lastDlssgOptionsReplayable = false;
+        nativeVulkanDlssgMenuStateKnown = false;
+        nativeVulkanDlssgMenuPaused = false;
+        if (state.nativeVulkanDlssg)
+            LOG_INFO("Native Vulkan DLSSG: preserving the game's Streamline plugins, requirements and FG callbacks");
+    }
+
     State::Instance().slFGInputs.reportEngineType(localPref.engine);
 
     // Treat engine type set in Streamline as ground truth
@@ -134,7 +169,8 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     std::vector<const wchar_t*> storage;
 
     // Replace the SL files to allow for MFG
-    if (State::Instance().activeFgInput == FGInput::NvngxFG && std::filesystem::exists(localSlPath / L"sl.common.dll"))
+    if (!IsNativeVulkanDlssg() && State::Instance().activeFgInput == FGInput::NvngxFG &&
+        std::filesystem::exists(localSlPath / L"sl.common.dll"))
     {
         storage.assign(localPref.pathsToPlugins, localPref.pathsToPlugins + localPref.numPathsToPlugins);
 
@@ -241,7 +277,8 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         }
     }
 
-    if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgOutput == FGOutput::DLSSG)
+    if ((State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgOutput == FGOutput::DLSSG) &&
+        !IsNativeVulkanDlssg())
     {
         std::vector<sl::Feature> localFeaturesToLoad(pref.featuresToLoad, pref.featuresToLoad + pref.numFeaturesToLoad);
         std::erase(localFeaturesToLoad, sl::kFeatureDLSS_G);
@@ -271,6 +308,9 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
 
 sl::Result StreamlineHooks::hkslIsFeatureSupported(sl::Feature feature, const sl::AdapterInfo& adapterInfo)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slIsFeatureSupported(feature, adapterInfo);
+
     if (feature == sl::kFeatureDLSS_G)
         return sl::Result::eOk;
 
@@ -279,6 +319,9 @@ sl::Result StreamlineHooks::hkslIsFeatureSupported(sl::Feature feature, const sl
 
 sl::Result StreamlineHooks::hkslIsFeatureLoaded(sl::Feature feature, bool& loaded)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slIsFeatureLoaded(feature, loaded);
+
     if (feature == sl::kFeatureDLSS_G)
     {
         loaded = true;
@@ -290,6 +333,9 @@ sl::Result StreamlineHooks::hkslIsFeatureLoaded(sl::Feature feature, bool& loade
 
 sl::Result StreamlineHooks::hkslGetFeatureRequirements(sl::Feature feature, sl::FeatureRequirements& requirements)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slGetFeatureRequirements(feature, requirements);
+
     if (feature == sl::kFeatureDLSS_G)
         return sl::Result::eOk;
 
@@ -298,6 +344,9 @@ sl::Result StreamlineHooks::hkslGetFeatureRequirements(sl::Feature feature, sl::
 
 sl::Result StreamlineHooks::hkslGetFeatureVersion(sl::Feature feature, sl::FeatureVersion& version)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slGetFeatureVersion(feature, version);
+
     if (feature == sl::kFeatureDLSS_G)
     {
         version.versionSL = { State::Instance().streamlineVersion.major, State::Instance().streamlineVersion.minor,
@@ -331,6 +380,27 @@ static sl::Result dummy_slDLSSGSetOptions(const sl::ViewportHandle& viewport, co
 
 sl::Result StreamlineHooks::hkslGetFeatureFunction(sl::Feature feature, const char* functionName, void*& function)
 {
+    if (IsNativeVulkanDlssg())
+    {
+        const auto result = o_slGetFeatureFunction(feature, functionName, function);
+        if (result == sl::Result::eOk && feature == sl::kFeatureDLSS_G && functionName && function)
+        {
+            if (strcmp(functionName, "slDLSSGSetOptions") == 0 &&
+                function != reinterpret_cast<void*>(&hkslDLSSGSetOptions))
+            {
+                o_slDLSSGSetOptions = reinterpret_cast<decltype(&slDLSSGSetOptions)>(function);
+                function = reinterpret_cast<void*>(&hkslDLSSGSetOptions);
+            }
+            else if (strcmp(functionName, "slDLSSGGetState") == 0 &&
+                     function != reinterpret_cast<void*>(&hkslDLSSGGetState))
+            {
+                o_slDLSSGGetState = reinterpret_cast<decltype(&slDLSSGGetState)>(function);
+                function = reinterpret_cast<void*>(&hkslDLSSGGetState);
+            }
+        }
+        return result;
+    }
+
     if (feature == sl::kFeatureDLSS_G)
     {
         if (strcmp(functionName, "slDLSSGSetOptions") == 0)
@@ -354,6 +424,9 @@ sl::Result StreamlineHooks::hkslGetFeatureFunction(sl::Feature feature, const ch
 sl::Result StreamlineHooks::hkslSetTag(const sl::ViewportHandle& viewport, const sl::ResourceTag* tags,
                                        uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slSetTag(viewport, tags, numTags, cmdBuffer);
+
     if (renderApi == sl::RenderAPI::eD3D11 || renderApi == sl::RenderAPI::eVulkan)
     {
         LOG_ERROR("hkslSetTag only supports DX12");
@@ -441,6 +514,9 @@ sl::Result StreamlineHooks::hkslSetTagForFrame(const sl::FrameToken& frame, cons
                                                const sl::ResourceTag* resources, uint32_t numResources,
                                                sl::CommandBuffer* cmdBuffer)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slSetTagForFrame(frame, viewport, resources, numResources, cmdBuffer);
+
     if (renderApi == sl::RenderAPI::eD3D11 || renderApi == sl::RenderAPI::eVulkan)
     {
         LOG_ERROR("hkslSetTagForFrame only supports DX12");
@@ -521,6 +597,9 @@ sl::Result StreamlineHooks::hkslEvaluateFeature(sl::Feature feature, const sl::F
                                                 const sl::BaseStructure** inputs, uint32_t numInputs,
                                                 sl::CommandBuffer* cmdBuffer)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slEvaluateFeature(feature, frame, inputs, numInputs, cmdBuffer);
+
     LOG_DEBUG("frameIndex: {}", static_cast<uint32_t>(frame));
 
     if (State::Instance().activeFgInput == FGInput::DLSSG && numInputs > 0 && inputs != nullptr)
@@ -881,7 +960,7 @@ bool StreamlineHooks::hkdlssg_slOnPluginLoad(sl::param::IParameters* params, con
     static std::string config;
 
     bool shouldSpoofArch =
-        Config::Instance()->StreamlineSpoofing.value_or_default() &&
+        !IsNativeVulkanDlssg() && Config::Instance()->StreamlineSpoofing.value_or_default() &&
         (State::Instance().activeFgInput == FGInput::NvngxFG || State::Instance().activeFgInput == FGInput::DLSSG);
 
     uint32_t currentArch = 0;
@@ -896,6 +975,11 @@ bool StreamlineHooks::hkdlssg_slOnPluginLoad(sl::param::IParameters* params, con
 
     if (shouldSpoofArch)
         setArch(currentArch);
+
+    // Native Vulkan DLSS-G remains owned by Streamline and the game. Keep its plugin paths,
+    // feature list, queue requirements and hooks intact; the NR path only observes/forwards it.
+    if (IsNativeVulkanDlssg())
+        return result;
 
     nlohmann::json configJson = nlohmann::json::parse(*pluginJSON);
 
@@ -1051,6 +1135,9 @@ bool StreamlineHooks::hklocal_dlssg_slOnPluginLoad(sl::param::IParameters* param
 sl::Result StreamlineHooks::hkslSetConstants(const sl::Constants& values, const sl::FrameToken& frame,
                                              const sl::ViewportHandle& viewport)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slSetConstants(values, frame, viewport);
+
     std::scoped_lock lock(setConstantsMutex);
     LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
 
@@ -1096,8 +1183,60 @@ bool StreamlineHooks::hkcommon_slOnPluginLoad(sl::param::IParameters* params, co
 
 sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options)
 {
+    std::lock_guard lock(dlssgOptionsMutex);
+
     lastDlssgViewport = viewport;
-    lastDlssgOptions = options;
+    const auto optionsSize = DlssgOptionsSize(static_cast<uint32_t>(options.structVersion));
+    lastDlssgOptionsReplayable = optionsSize != 0 && options.next == nullptr;
+    if (lastDlssgOptionsReplayable)
+        memcpy(&lastDlssgOptions, &options, optionsSize);
+    else
+        lastDlssgOptions = {};
+
+    auto& state = State::Instance();
+
+    if (IsNativeVulkanDlssg())
+    {
+        state.nativeVulkanDlssgOptionsSeen = true;
+        state.nativeVulkanDlssgRequested = options.mode != sl::DLSSGMode::eOff;
+        const auto recordResult = [&](sl::Result result)
+        {
+            const auto code = static_cast<unsigned int>(result);
+            if (result != sl::Result::eOk && state.nativeVulkanDlssgLastResult != code)
+                LOG_WARN("Native Vulkan DLSSG: slDLSSGSetOptions returned {}", code);
+            state.nativeVulkanDlssgLastResult = code;
+        };
+
+        // An unknown future struct cannot be safely copied or replayed. Pass it through intact and
+        // let the present-thread helper refuse overlay writes while the menu is visible.
+        if (!lastDlssgOptionsReplayable)
+        {
+            const auto result = o_slDLSSGSetOptions(viewport, options);
+            recordResult(result);
+            nativeVulkanDlssgMenuStateKnown = result == sl::Result::eOk;
+            nativeVulkanDlssgMenuPaused = false;
+            return result;
+        }
+
+        sl::DLSSGOptions nativeOptions {};
+        memcpy(&nativeOptions, &options, optionsSize);
+        nativeOptions.structVersion = options.structVersion;
+
+        const auto dlssgPotentiallyActive = options.mode == sl::DLSSGMode::eOn ||
+                                            options.mode == sl::DLSSGMode::eAuto ||
+                                            options.mode == sl::DLSSGMode::eDynamic;
+        applyMenuDlssgInterlock(nativeOptions, dlssgPotentiallyActive);
+
+        state.dlssgLastSetMode = options.mode;
+        const auto result = o_slDLSSGSetOptions(viewport, nativeOptions);
+        recordResult(result);
+
+        const bool menuInterlockActive = dlssgPotentiallyActive && MenuOverlayBase::IsVisible() &&
+                                         (state.swapchainApi == API::Vulkan || state.menuOverlayIsVulkan);
+        nativeVulkanDlssgMenuStateKnown = result == sl::Result::eOk;
+        nativeVulkanDlssgMenuPaused = nativeVulkanDlssgMenuStateKnown && menuInterlockActive;
+        return result;
+    }
 
     // Avoid reading past the game's struct's size
     sl::DLSSGOptions newOptions {};
@@ -1118,8 +1257,6 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
     // What the game asked for, before any override. A struct too old to carry the field reads as 1 (2X).
     const unsigned int requestedCount = newOptions.numFramesToGenerate;
 #endif
-
-    auto& state = State::Instance();
 
     // Disable game's DLSSG when we are trying to create our own instance of DLSSG
     if (state.activeFgInput != FGInput::DLSSG && state.activeFgOutput == FGOutput::DLSSG)
@@ -1228,6 +1365,11 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
                                               const sl::DLSSGOptions* options)
 {
+    std::lock_guard lock(dlssgOptionsMutex);
+
+    if (IsNativeVulkanDlssg())
+        return o_slDLSSGGetState(viewport, state, options);
+
     sl::Result result {};
 
 #if defined(OPTISCALER_RTX40_MFG)
@@ -1599,6 +1741,9 @@ void* StreamlineHooks::hkreflex_slGetPluginFunction(const char* functionName)
 
 sl::Result StreamlineHooks::hkslPCLSetMarker(sl::PCLMarker marker, const sl::FrameToken& frame)
 {
+    if (IsNativeVulkanDlssg())
+        return o_slPCLSetMarker(marker, frame);
+
     // if (State::Instance().activeFgOutput == FGOutput::DLSSG && StreamlineProxy::IsD3D12Inited() &&
     //     Config::Instance()->FGDLSSGUseGamesReflexMarkers.value_or_default())
     //{
@@ -1799,12 +1944,72 @@ void StreamlineHooks::updateForceReflex()
     }
 }
 
+bool StreamlineHooks::IsNativeVulkanDlssg()
+{
+    std::lock_guard lock(dlssgOptionsMutex);
+    return State::Instance().nativeVulkanDlssg;
+}
+
+StreamlineHooks::NativeVulkanDlssgStatus StreamlineHooks::GetNativeVulkanDlssgStatus()
+{
+    std::lock_guard lock(dlssgOptionsMutex);
+    const auto& state = State::Instance();
+    return { state.nativeVulkanDlssg, state.nativeVulkanDlssgOptionsSeen, state.nativeVulkanDlssgRequested,
+             state.nativeVulkanDlssgLastResult };
+}
+
+bool StreamlineHooks::SyncNativeVulkanDlssgMenu(bool overlayWillRender)
+{
+    if (!IsNativeVulkanDlssg())
+        return true;
+
+    std::lock_guard lock(dlssgOptionsMutex);
+    auto& state = State::Instance();
+    const bool menuInterlockActive =
+        MenuOverlayBase::IsVisible() && (state.swapchainApi == API::Vulkan || state.menuOverlayIsVulkan);
+
+    if (!state.nativeVulkanDlssgOptionsSeen)
+        return true;
+
+    if (!state.nativeVulkanDlssgRequested)
+        return nativeVulkanDlssgMenuStateKnown;
+
+    // A future options struct must be passed through untouched. Without a complete cache we cannot
+    // replay the game's request to pause DLSS-G safely, so keep the overlay away while the menu is open.
+    if (!lastDlssgOptionsReplayable)
+        return !overlayWillRender;
+
+    if (!o_slDLSSGSetOptions)
+        return false;
+
+    // FPS counters and toasts also render while the main menu is closed. Do not pause FG
+    // permanently for these overlays, and do not write an image still used by native FG.
+    const bool canDrawOverlay = !overlayWillRender || menuInterlockActive;
+    if (nativeVulkanDlssgMenuStateKnown && nativeVulkanDlssgMenuPaused == menuInterlockActive)
+        return canDrawOverlay;
+
+    const auto requestedOptions = lastDlssgOptions;
+    const auto result = hkslDLSSGSetOptions(lastDlssgViewport, requestedOptions);
+    if (result != sl::Result::eOk)
+    {
+        state.nativeVulkanDlssgLastResult = static_cast<unsigned int>(result);
+        nativeVulkanDlssgMenuStateKnown = false;
+        return false;
+    }
+
+    nativeVulkanDlssgMenuStateKnown = true;
+    nativeVulkanDlssgMenuPaused = menuInterlockActive;
+    return canDrawOverlay;
+}
+
 void StreamlineHooks::updateDlssgOptions()
 {
-    if (o_slDLSSGSetOptions)
+    std::lock_guard lock(dlssgOptionsMutex);
+    if (o_slDLSSGSetOptions && lastDlssgOptionsReplayable)
     {
         LOG_FUNC();
-        hkslDLSSGSetOptions(lastDlssgViewport, lastDlssgOptions);
+        const auto requestedOptions = lastDlssgOptions;
+        hkslDLSSGSetOptions(lastDlssgViewport, requestedOptions);
     }
 }
 

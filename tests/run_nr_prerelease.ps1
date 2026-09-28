@@ -9,6 +9,7 @@ try {
     & "$PSScriptRoot/run_nr_gpu_lifetime.ps1"
     & "$PSScriptRoot/dlssnr_proxy/run.ps1"
     & "$PSScriptRoot/run_nr_vulkan_model.ps1"
+    & "$PSScriptRoot/run_native_vulkan_dlssg.ps1"
     & "$PSScriptRoot/mfg_unlock/run.ps1"
     & "$PSScriptRoot/run_nr_pipeline_capture.ps1"
     & "$PSScriptRoot/run_nr_streamline_hooks.ps1"

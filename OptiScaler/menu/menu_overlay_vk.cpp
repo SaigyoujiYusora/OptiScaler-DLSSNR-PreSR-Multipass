@@ -5,6 +5,7 @@
 #include <Util.h>
 #include <Config.h>
 #include <SysUtils.h>
+#include <hooks/Streamline_Hooks.h>
 
 #include <imgui/imgui_impl_vulkan.h>
 #include <imgui/imgui_impl_win32.h>
@@ -530,9 +531,13 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
         if (State::Instance().delayMenuRenderBy > 0)
             State::Instance().delayMenuRenderBy--;
 
-        if (MenuOverlayBase::RenderMenu())
+        const bool renderMenu = MenuOverlayBase::RenderMenu();
+        // Run on the Vulkan present thread, after input changed visibility and before writing
+        // the swapchain image. A failed FG pause must not race the overlay's GPU submission.
+        const bool nativeFgAllowsOverlay = StreamlineHooks::SyncNativeVulkanDlssgMenu(renderMenu);
+        if (renderMenu)
         {
-            if (State::Instance().delayMenuRenderBy == 0)
+            if (State::Instance().delayMenuRenderBy == 0 && nativeFgAllowsOverlay)
             {
                 uint32_t idx = pPresentInfo->pImageIndices[0];
                 ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[idx];

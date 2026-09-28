@@ -799,8 +799,9 @@ void InitNGXParameters(NVSDK_NGX_Parameter* InParams, API api)
         InParams->Set("SuperSamplingDenoising.FeatureInitResult", 0);
     }
 
-    if ((api == API::DX12 || api == API::Vulkan) && (State::Instance().activeFgInput == FGInput::DLSSG ||
-                                                     State::Instance().activeFgNvngx != FGNvngxReplacement::None))
+    if (!(api == API::Vulkan && State::Instance().nativeVulkanDlssg) && (api == API::DX12 || api == API::Vulkan) &&
+        (State::Instance().activeFgInput == FGInput::DLSSG ||
+         State::Instance().activeFgNvngx != FGNvngxReplacement::None))
     {
         InParams->Set("FrameGeneration.Available", 1);
         InParams->Set("FrameGeneration.NeedsUpdatedDriver", 0);

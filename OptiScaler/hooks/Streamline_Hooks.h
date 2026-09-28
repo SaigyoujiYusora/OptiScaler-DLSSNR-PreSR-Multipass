@@ -12,6 +12,8 @@
 
 #include "Hook_Utils.h"
 
+#include <optional>
+
 struct Adapter
 {
     LUID id {};
@@ -140,6 +142,16 @@ class StreamlineHooks
 
     static void updateForceReflex();
     static void updateDlssgOptions();
+    struct NativeVulkanDlssgStatus
+    {
+        bool active = false;
+        bool optionsSeen = false;
+        bool requested = false;
+        std::optional<unsigned int> lastResult;
+    };
+    static NativeVulkanDlssgStatus GetNativeVulkanDlssgStatus();
+    static bool IsNativeVulkanDlssg();
+    static bool SyncNativeVulkanDlssgMenu(bool overlayWillRender);
     static void applyMenuDlssgInterlock(sl::DLSSGOptions& options, bool potentiallyActive);
 
     static void unhookInterposer();
@@ -174,6 +186,7 @@ class StreamlineHooks
   private:
     inline static sl::RenderAPI renderApi = sl::RenderAPI::eCount;
     inline static std::mutex setConstantsMutex {};
+    inline static std::recursive_mutex dlssgOptionsMutex {};
 
     // System caps
     inline static SystemCaps* systemCaps = nullptr;
@@ -254,6 +267,9 @@ class StreamlineHooks
     inline static decltype(&slDLSSGGetState) o_slDLSSGGetState = nullptr;
     static inline sl::ViewportHandle lastDlssgViewport {}; // For updating options when we change them
     static inline sl::DLSSGOptions lastDlssgOptions {};
+    static inline bool lastDlssgOptionsReplayable = false;
+    static inline bool nativeVulkanDlssgMenuStateKnown = false;
+    static inline bool nativeVulkanDlssgMenuPaused = false;
 
     static bool hkdlssg_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON, const char** pluginJSON);
     static sl::Result hkslSetConstants(const sl::Constants& values, const sl::FrameToken& frame,

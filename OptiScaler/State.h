@@ -234,6 +234,13 @@ class State
 
     feature_version streamlineVersion = { 0, 0, 0 };
 
+    // Native Vulkan DLSS-G remains owned by the game's Streamline path. These fields expose the
+    // request/result to the UI without changing the active FG backend to pretend OptiScaler owns it.
+    std::atomic_bool nativeVulkanDlssg { false };
+    bool nativeVulkanDlssgOptionsSeen = false;
+    bool nativeVulkanDlssgRequested = false;
+    std::optional<unsigned int> nativeVulkanDlssgLastResult = std::nullopt;
+
     // Has value when Opti was able to hook sl and the game set DLSSG options
     std::optional<int> dlssgMfgMax = std::nullopt;
 
