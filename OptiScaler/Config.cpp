@@ -1261,7 +1261,8 @@ bool Config::SaveIni(std::filesystem::path destination)
         ini.SetValue("DLSS", "Enabled", GetBoolValue(Instance()->DLSSEnabled.value_for_config()).c_str());
 
         // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
-        ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
+        // NR activation is session-only; saving settings must keep the next launch off.
+        ini.SetValue("DlssNr", "Enabled", "auto");
         ini.SetValue("DlssNr", "FinishedPicture",
                      GetBoolValue(Instance()->DlssNrFinishedPicture.value_for_config()).c_str());
         ini.SetValue("DlssNr", "HdrTransfer", GetBoolValue(Instance()->DlssNrHdrTransfer.value_for_config()).c_str());
