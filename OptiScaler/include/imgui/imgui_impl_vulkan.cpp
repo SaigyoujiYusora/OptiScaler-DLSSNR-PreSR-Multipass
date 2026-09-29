@@ -521,7 +521,7 @@ static void ImGui_ImplVulkan_SetupRenderState(ImDrawData* draw_data, VkPipeline 
 }
 
 // Render function
-void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer command_buffer, VkPipeline pipeline)
+void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer command_buffer, VkPipeline pipeline, uint32_t frame_index)
 {
     // Avoid rendering when minimized, scale coordinates for retina displays (screen coordinates != framebuffer coordinates)
     int fb_width = (int)(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);
@@ -553,7 +553,8 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
         memset((void*)wrb->FrameRenderBuffers.Data, 0, wrb->FrameRenderBuffers.size_in_bytes());
     }
     IM_ASSERT(wrb->Count == v->ImageCount);
-    wrb->Index = (wrb->Index + 1) % wrb->Count;
+    // OptiScaler's fence belongs to the acquired image, which need not arrive in round-robin order.
+    wrb->Index = frame_index < wrb->Count ? frame_index : (wrb->Index + 1) % wrb->Count;
     ImGui_ImplVulkan_FrameRenderBuffers* rb = &wrb->FrameRenderBuffers[wrb->Index];
 
     if (draw_data->TotalVtxCount > 0)
@@ -1303,6 +1304,16 @@ void ImGui_ImplVulkan_Shutdown(bool shutdown_platform)
     io.BackendRendererUserData = nullptr;
     io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasViewports);
     IM_DELETE(bd);
+}
+
+bool ImGui_ImplVulkan_SetPresentQueue(VkQueue queue, uint32_t queue_family)
+{
+    ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
+    if (bd == nullptr || queue == VK_NULL_HANDLE || bd->VulkanInitInfo.QueueFamily != queue_family)
+        return false;
+    // Texture updates submit synchronously. Use the externally synchronized present queue too.
+    bd->VulkanInitInfo.Queue = queue;
+    return true;
 }
 
 void ImGui_ImplVulkan_NewFrame()

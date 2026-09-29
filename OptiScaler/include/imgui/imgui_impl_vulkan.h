@@ -112,7 +112,9 @@ struct ImGui_ImplVulkan_InitInfo
 IMGUI_IMPL_API bool             ImGui_ImplVulkan_Init(ImGui_ImplVulkan_InitInfo* info);
 IMGUI_IMPL_API void             ImGui_ImplVulkan_Shutdown(bool shutdown_platform = true);
 IMGUI_IMPL_API void             ImGui_ImplVulkan_NewFrame();
-IMGUI_IMPL_API void             ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer command_buffer, VkPipeline pipeline = VK_NULL_HANDLE);
+// OptiScaler: caller holds the present queue and waits the selected image's fence before drawing.
+IMGUI_IMPL_API bool             ImGui_ImplVulkan_SetPresentQueue(VkQueue queue, uint32_t queue_family);
+IMGUI_IMPL_API void             ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer command_buffer, VkPipeline pipeline = VK_NULL_HANDLE, uint32_t frame_index = ~0u);
 IMGUI_IMPL_API void             ImGui_ImplVulkan_SetMinImageCount(uint32_t min_image_count); // To override MinImageCount after initialization (e.g. if swap chain is recreated)
 
 // (Advanced) Use e.g. if you need to precisely control the timing of texture updates (e.g. for staged rendering), by setting ImDrawData::Textures = NULL to handle this manually.

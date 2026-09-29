@@ -23,6 +23,15 @@
 #include <detours/detours.h>
 #include <misc/IdentifyGpu.h>
 
+#include <algorithm>
+#include <cwctype>
+#include <mutex>
+#include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 #include "Hook_Utils.h"
 
 // for menu rendering
@@ -38,6 +47,7 @@ PFN_vkCreateInstance o_vkCreateInstance = nullptr;
 PFN_vkCreateWin32SurfaceKHR o_vkCreateWin32SurfaceKHR = nullptr;
 PFN_vkQueuePresentKHR o_QueuePresentKHR = nullptr;
 PFN_vkCreateSwapchainKHR o_CreateSwapchainKHR = nullptr;
+PFN_vkDestroySwapchainKHR o_DestroySwapchainKHR = nullptr;
 static PFN_vkGetInstanceProcAddr o_vkGetInstanceProcAddr = nullptr;
 static PFN_vkGetDeviceProcAddr o_vkGetDeviceProcAddr = nullptr;
 
@@ -47,10 +57,291 @@ PFN_vkCreateSemaphore VulkanHooks::o_vkCreateSemaphore = nullptr;
 PFN_vkSignalSemaphore VulkanHooks::o_vkSignalSemaphore = nullptr;
 PFN_vkAntiLagUpdateAMD VulkanHooks::o_vkAntiLagUpdateAMD = nullptr;
 
+namespace
+{
+template <typename T> uint64_t HandleKey(T handle)
+{
+    if constexpr (std::is_pointer_v<T>)
+        return reinterpret_cast<uint64_t>(handle);
+    else
+        return static_cast<uint64_t>(handle);
+}
+
+struct SwapchainState
+{
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    bool verifiedWsi = false;
+};
+
+struct DeviceState
+{
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    PFN_vkGetSwapchainImagesKHR getSwapchainImages = nullptr;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR getSurfaceSupport = nullptr;
+    bool verifiedWsi = false;
+    std::unordered_map<uint64_t, VulkanHooks::QueueInfo> queues;
+    std::unordered_map<uint64_t, SwapchainState> swapchains;
+};
+
+std::mutex wsiMutex;
+std::unordered_map<uint64_t, DeviceState> deviceStates;
+std::unordered_set<uint64_t> unverifiedWsiLogged;
+
+enum class WsiKind
+{
+    None,
+    NvidiaIcd,
+    ObsLayer,
+};
+
+HMODULE ModuleFromAddress(PFN_vkVoidFunction function)
+{
+    if (!function)
+        return nullptr;
+
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(function), &module))
+        return nullptr;
+    return module;
+}
+
+std::wstring ModuleBaseName(HMODULE module)
+{
+    wchar_t path[MAX_PATH] = {};
+    const auto length = GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path)));
+    if (!length)
+        return {};
+    std::wstring name(path, length);
+    const auto slash = name.find_last_of(L"\\/");
+    if (slash != std::wstring::npos)
+        name.erase(0, slash + 1);
+    std::transform(name.begin(), name.end(), name.begin(), [](wchar_t c) { return std::towlower(c); });
+    return name;
+}
+
+WsiKind VerifyWsi(PFN_vkVoidFunction createSwapchain, PFN_vkVoidFunction queuePresent,
+                  PFN_vkVoidFunction getSwapchainImages)
+{
+    const auto createModule = ModuleFromAddress(createSwapchain);
+    const auto presentModule = ModuleFromAddress(queuePresent);
+    const auto imagesModule = ModuleFromAddress(getSwapchainImages);
+    if (!createModule || createModule != presentModule || createModule != imagesModule)
+        return WsiKind::None;
+    return ModuleBaseName(createModule) == L"nvoglv64.dll" ? WsiKind::NvidiaIcd : WsiKind::None;
+}
+
+WsiKind VerifyWsiWithObsLayer(PFN_vkVoidFunction createSwapchain, PFN_vkVoidFunction queuePresent,
+                              PFN_vkVoidFunction getSwapchainImages)
+{
+    const auto createModule = ModuleFromAddress(createSwapchain);
+    const auto presentModule = ModuleFromAddress(queuePresent);
+    const auto imagesModule = ModuleFromAddress(getSwapchainImages);
+    if (!createModule || !presentModule || !imagesModule || createModule != presentModule ||
+        ModuleBaseName(createModule) != L"graphics-hook64.dll" || ModuleBaseName(imagesModule) != L"nvoglv64.dll")
+        return WsiKind::None;
+    return GetProcAddress(createModule, "OBS_Negotiate") != nullptr ? WsiKind::ObsLayer : WsiKind::None;
+}
+} // namespace
+
 // Forward declaration
 static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo);
 static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
                                        const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain);
+static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator);
+
+void VulkanHooks::RecordDevice(VkDevice device, VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* createInfo)
+{
+    if (device == VK_NULL_HANDLE || physicalDevice == VK_NULL_HANDLE || createInfo == nullptr)
+        return;
+
+    DeviceState recorded {};
+    recorded.physicalDevice = physicalDevice;
+
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    if (familyCount)
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &familyCount, families.data());
+
+    const auto getDeviceProc = vkGetDeviceProcAddr;
+    const auto getQueue =
+        getDeviceProc ? reinterpret_cast<PFN_vkGetDeviceQueue>(getDeviceProc(device, "vkGetDeviceQueue")) : nullptr;
+    if (!getQueue)
+    {
+        LOG_WARN("Vulkan overlay queue record: vkGetDeviceQueue is unavailable");
+        return;
+    }
+
+    for (uint32_t i = 0; i < createInfo->queueCreateInfoCount; ++i)
+    {
+        const auto& queueCreate = createInfo->pQueueCreateInfos[i];
+        if (queueCreate.queueFamilyIndex >= families.size())
+            continue;
+
+        // vkGetDeviceQueue is only valid for the ordinary queue-create path. Protected or
+        // otherwise flagged queues require a separate retrieval path and are not safe for this overlay.
+        if (queueCreate.flags != 0)
+            continue;
+
+        const bool protectedQueue = (queueCreate.flags & VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT) != 0;
+        for (uint32_t queueIndex = 0; queueIndex < queueCreate.queueCount; ++queueIndex)
+        {
+            VkQueue queue = VK_NULL_HANDLE;
+            getQueue(device, queueCreate.queueFamilyIndex, queueIndex, &queue);
+            if (queue == VK_NULL_HANDLE)
+                continue;
+
+            VulkanHooks::QueueInfo info {};
+            info.queue = queue;
+            info.familyIndex = queueCreate.queueFamilyIndex;
+            info.queueIndex = queueIndex;
+            info.flags = families[queueCreate.queueFamilyIndex].queueFlags;
+            info.protectedQueue = protectedQueue;
+            recorded.queues.emplace(HandleKey(queue), info);
+        }
+    }
+
+    const auto instance = State::Instance().VulkanInstance;
+    const auto getImages =
+        getDeviceProc ? reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(getDeviceProc(device, "vkGetSwapchainImagesKHR"))
+                      : nullptr;
+    const auto createSwapchain =
+        getDeviceProc ? reinterpret_cast<PFN_vkCreateSwapchainKHR>(getDeviceProc(device, "vkCreateSwapchainKHR"))
+                      : nullptr;
+    const auto queuePresent =
+        getDeviceProc ? reinterpret_cast<PFN_vkQueuePresentKHR>(getDeviceProc(device, "vkQueuePresentKHR")) : nullptr;
+    recorded.getSwapchainImages = getImages;
+    recorded.getSurfaceSupport = instance != VK_NULL_HANDLE
+                                     ? reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>(
+                                           vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceSupportKHR"))
+                                     : nullptr;
+    const auto wsiKind =
+        VerifyWsi(reinterpret_cast<PFN_vkVoidFunction>(createSwapchain),
+                  reinterpret_cast<PFN_vkVoidFunction>(queuePresent), reinterpret_cast<PFN_vkVoidFunction>(getImages));
+    const auto acceptedWsiKind = wsiKind != WsiKind::None
+                                     ? wsiKind
+                                     : VerifyWsiWithObsLayer(reinterpret_cast<PFN_vkVoidFunction>(createSwapchain),
+                                                             reinterpret_cast<PFN_vkVoidFunction>(queuePresent),
+                                                             reinterpret_cast<PFN_vkVoidFunction>(getImages));
+    recorded.verifiedWsi = acceptedWsiKind != WsiKind::None;
+
+    bool firstUnverifiedLog = false;
+    {
+        std::lock_guard lock(wsiMutex);
+        deviceStates[HandleKey(device)] = std::move(recorded);
+        if (acceptedWsiKind == WsiKind::None)
+            firstUnverifiedLog = unverifiedWsiLogged.insert(HandleKey(device)).second;
+    }
+
+    if (acceptedWsiKind != WsiKind::None)
+    {
+        LOG_INFO("Vulkan overlay WSI boundary: verified {} path",
+                 acceptedWsiKind == WsiKind::NvidiaIcd ? "native NVIDIA ICD" : "OBS passthrough layer");
+    }
+    else if (firstUnverifiedLog)
+    {
+        LOG_INFO("Vulkan overlay WSI boundary: native ICD verification failed; create/present/getimages "
+                 "are not one nvoglv64.dll module, native boundary disabled");
+    }
+}
+
+bool VulkanHooks::GetGraphicsQueue(VkDevice device, QueueInfo& info)
+{
+    std::lock_guard lock(wsiMutex);
+    const auto deviceIt = deviceStates.find(HandleKey(device));
+    if (deviceIt == deviceStates.end())
+        return false;
+
+    for (const auto& [key, candidate] : deviceIt->second.queues)
+    {
+        if (!candidate.protectedQueue && (candidate.flags & VK_QUEUE_GRAPHICS_BIT) != 0)
+        {
+            info = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool VulkanHooks::GetPresentQueue(VkDevice device, VkQueue queue, VkSwapchainKHR swapchain, QueueInfo& info,
+                                  bool* verifiedWsi)
+{
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR getSurfaceSupport = nullptr;
+    {
+        std::lock_guard lock(wsiMutex);
+        const auto deviceIt = deviceStates.find(HandleKey(device));
+        if (deviceIt == deviceStates.end())
+            return false;
+        const auto queueIt = deviceIt->second.queues.find(HandleKey(queue));
+        const auto swapchainIt = deviceIt->second.swapchains.find(HandleKey(swapchain));
+        if (queueIt == deviceIt->second.queues.end() || swapchainIt == deviceIt->second.swapchains.end())
+            return false;
+        info = queueIt->second;
+        if (verifiedWsi)
+            *verifiedWsi = swapchainIt->second.verifiedWsi;
+        physicalDevice = deviceIt->second.physicalDevice;
+        surface = swapchainIt->second.surface;
+        getSurfaceSupport = deviceIt->second.getSurfaceSupport;
+    }
+
+    if (info.protectedQueue || (info.flags & VK_QUEUE_GRAPHICS_BIT) == 0 || !getSurfaceSupport ||
+        surface == VK_NULL_HANDLE)
+        return false;
+
+    VkBool32 supported = VK_FALSE;
+    if (getSurfaceSupport(physicalDevice, info.familyIndex, surface, &supported) != VK_SUCCESS || !supported)
+        return false;
+    return true;
+}
+
+PFN_vkGetSwapchainImagesKHR VulkanHooks::GetSwapchainImages(VkDevice device, VkSwapchainKHR swapchain,
+                                                            bool* verifiedWsi)
+{
+    std::lock_guard lock(wsiMutex);
+    const auto deviceIt = deviceStates.find(HandleKey(device));
+    if (deviceIt == deviceStates.end())
+        return nullptr;
+    const auto swapchainIt = deviceIt->second.swapchains.find(HandleKey(swapchain));
+    if (swapchainIt == deviceIt->second.swapchains.end())
+        return nullptr;
+    if (verifiedWsi)
+        *verifiedWsi = swapchainIt->second.verifiedWsi;
+    return deviceIt->second.getSwapchainImages;
+}
+
+bool VulkanHooks::IsVerifiedSwapchain(VkDevice device, VkSwapchainKHR swapchain)
+{
+    bool verified = false;
+    GetSwapchainImages(device, swapchain, &verified);
+    return verified;
+}
+
+void VulkanHooks::RecordSwapchain(VkDevice device, VkSwapchainKHR swapchain, VkSurfaceKHR surface)
+{
+    std::lock_guard lock(wsiMutex);
+    const auto deviceIt = deviceStates.find(HandleKey(device));
+    if (deviceIt == deviceStates.end())
+        return;
+    deviceIt->second.swapchains[HandleKey(swapchain)] = { surface, deviceIt->second.verifiedWsi };
+}
+
+void VulkanHooks::ForgetSwapchain(VkDevice device, VkSwapchainKHR swapchain)
+{
+    std::lock_guard lock(wsiMutex);
+    const auto deviceIt = deviceStates.find(HandleKey(device));
+    if (deviceIt != deviceStates.end())
+        deviceIt->second.swapchains.erase(HandleKey(swapchain));
+}
+
+void VulkanHooks::ForgetDevice(VkDevice device)
+{
+    std::lock_guard lock(wsiMutex);
+    deviceStates.erase(HandleKey(device));
+    unverifiedWsiLogged.erase(HandleKey(device));
+}
 
 static void HookDevice(VkDevice InDevice)
 {
@@ -61,6 +352,7 @@ static void HookDevice(VkDevice InDevice)
 
     o_QueuePresentKHR = (PFN_vkQueuePresentKHR) (vkGetDeviceProcAddr(InDevice, "vkQueuePresentKHR"));
     o_CreateSwapchainKHR = (PFN_vkCreateSwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkCreateSwapchainKHR"));
+    o_DestroySwapchainKHR = (PFN_vkDestroySwapchainKHR) (vkGetDeviceProcAddr(InDevice, "vkDestroySwapchainKHR"));
 
     if (o_CreateSwapchainKHR)
     {
@@ -76,12 +368,16 @@ static void HookDevice(VkDevice InDevice)
         if (o_CreateSwapchainKHR != nullptr)
             DetourAttach(&(PVOID&) o_CreateSwapchainKHR, hkvkCreateSwapchainKHR);
 
+        if (o_DestroySwapchainKHR != nullptr)
+            DetourAttach(&(PVOID&) o_DestroySwapchainKHR, hkvkDestroySwapchainKHR);
+
         auto detourResult = DetourTransactionCommit();
         if (detourResult != NO_ERROR)
         {
             LOG_ERROR("Failed to hook VkDevice, error code: {:X}", detourResult);
             o_QueuePresentKHR = nullptr;
             o_CreateSwapchainKHR = nullptr;
+            o_DestroySwapchainKHR = nullptr;
         }
     }
 }
@@ -245,6 +541,8 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     {
         if (!State::Instance().vulkanSkipHooks)
         {
+            VulkanHooks::RecordDevice(*pDevice, physicalDevice, pCreateInfo);
+
             // Disabled to prevent unnecessary object release
             // MenuOverlayVk::DestroyVulkanObjects(false);
 
@@ -303,6 +601,7 @@ VALIDATE_HOOK(hkvkQueuePresentKHR, PFN_vkQueuePresentKHR)
 static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo)
 {
     LOG_FUNC();
+    MenuOverlayVk::PresentScope presentScope;
 
     // get upscaler time
     UpscalerTimeVk::ReadUpscalingTime(_device);
@@ -355,12 +654,19 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 
     VkSwapchainCreateInfoKHR nrCreateInfo = *pCreateInfo;
     const bool prepareNr = Config::Instance()->DlssNrEnabled.value_or_default();
-    if (prepareNr)
+    const bool prepareOverlay =
+        Config::Instance()->OverlayMenu.value_or_default() && !State::Instance().vulkanSkipHooks;
+    if (prepareNr || prepareOverlay)
     {
         VkSurfaceCapabilitiesKHR capabilities {};
         if (_PD && vkGetPhysicalDeviceSurfaceCapabilitiesKHR(_PD, pCreateInfo->surface, &capabilities) == VK_SUCCESS)
-            nrCreateInfo.imageUsage |=
-                capabilities.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        {
+            if (prepareNr)
+                nrCreateInfo.imageUsage |= capabilities.supportedUsageFlags &
+                                           (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            if (prepareOverlay)
+                nrCreateInfo.imageUsage |= capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        }
         pCreateInfo = &nrCreateInfo;
     }
     ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
@@ -373,6 +679,8 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE && pCreateInfo != nullptr && *pSwapchain != VK_NULL_HANDLE &&
         !State::Instance().vulkanSkipHooks)
     {
+        VulkanHooks::RecordSwapchain(device, *pSwapchain, pCreateInfo->surface);
+
         if (prepareNr)
             DlssNr::FinishedVkSwapchain(device, *pSwapchain, *pCreateInfo);
         State::Instance().screenWidth = static_cast<float>(pCreateInfo->imageExtent.width);
@@ -430,6 +738,14 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
 
     LOG_FUNC_RESULT(result);
     return result;
+}
+
+VALIDATE_HOOK(hkvkDestroySwapchainKHR, PFN_vkDestroySwapchainKHR)
+static void hkvkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator)
+{
+    MenuOverlayVk::DestroySwapchain(device, swapchain);
+    VulkanHooks::ForgetSwapchain(device, swapchain);
+    o_DestroySwapchainKHR(device, swapchain, pAllocator);
 }
 
 VALIDATE_HOOK(hkvkGetInstanceProcAddr, PFN_vkGetInstanceProcAddr)
@@ -583,6 +899,9 @@ void VulkanHooks::Unhook()
     if (o_CreateSwapchainKHR != nullptr)
         DetourDetach(&(PVOID&) o_CreateSwapchainKHR, hkvkCreateSwapchainKHR);
 
+    if (o_DestroySwapchainKHR != nullptr)
+        DetourDetach(&(PVOID&) o_DestroySwapchainKHR, hkvkDestroySwapchainKHR);
+
     if (o_vkCreateDevice != nullptr)
         DetourDetach(&(PVOID&) o_vkCreateDevice, hkvkCreateDevice);
 
@@ -602,8 +921,10 @@ void VulkanHooks::Unhook()
     }
     else
     {
+        VulkanHooks::ForgetDevice(_device);
         o_QueuePresentKHR = nullptr;
         o_CreateSwapchainKHR = nullptr;
+        o_DestroySwapchainKHR = nullptr;
         o_vkCreateDevice = nullptr;
         o_vkCreateInstance = nullptr;
         o_vkGetInstanceProcAddr = nullptr;

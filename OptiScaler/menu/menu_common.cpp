@@ -3317,13 +3317,15 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         ImGui::SeparatorText("Frame Generation (Game native)");
         ImGui::TextUnformatted("DLSSG uses the game's Vulkan pipeline.");
         ImGui::TextWrapped("Enable DLSS Frame Generation in the game's settings.");
-        if (!nativeFg.optionsSeen)
+        if (!nativeFg.available)
+            ImGui::TextDisabled("Updating the game's DLSSG status.");
+        else if (!nativeFg.optionsSeen)
             ImGui::TextDisabled("Waiting for the game's DLSSG request.");
         else if (nativeFg.requested)
         {
             ImGui::TextUnformatted("Game request: Enabled");
             ImGui::TextWrapped("Temporarily paused while this menu is open. Close it to resume.");
-            ImGui::TextDisabled("OptiScaler FPS and notification overlays are hidden during native FG.");
+            ImGui::TextDisabled("FPS and notifications remain available on the supported native Vulkan present path.");
         }
         else
             ImGui::TextUnformatted("Game request: Disabled");

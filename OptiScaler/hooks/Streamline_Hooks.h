@@ -148,10 +148,11 @@ class StreamlineHooks
         bool optionsSeen = false;
         bool requested = false;
         std::optional<unsigned int> lastResult;
+        bool available = true;
     };
     static NativeVulkanDlssgStatus GetNativeVulkanDlssgStatus();
     static bool IsNativeVulkanDlssg();
-    static bool SyncNativeVulkanDlssgMenu(bool overlayWillRender);
+    static bool SyncNativeVulkanDlssgMenu(bool overlayWillRender, bool nativePresentBoundary = false);
     static void applyMenuDlssgInterlock(sl::DLSSGOptions& options, bool potentiallyActive);
 
     static void unhookInterposer();

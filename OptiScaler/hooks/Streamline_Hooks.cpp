@@ -1946,24 +1946,30 @@ void StreamlineHooks::updateForceReflex()
 
 bool StreamlineHooks::IsNativeVulkanDlssg()
 {
-    std::lock_guard lock(dlssgOptionsMutex);
+    // This flag is atomic and is also read on the runtime's presentation worker.
     return State::Instance().nativeVulkanDlssg;
 }
 
 StreamlineHooks::NativeVulkanDlssgStatus StreamlineHooks::GetNativeVulkanDlssgStatus()
 {
-    std::lock_guard lock(dlssgOptionsMutex);
     const auto& state = State::Instance();
+    std::unique_lock lock(dlssgOptionsMutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return { state.nativeVulkanDlssg, false, false, std::nullopt, false };
     return { state.nativeVulkanDlssg, state.nativeVulkanDlssgOptionsSeen, state.nativeVulkanDlssgRequested,
              state.nativeVulkanDlssgLastResult };
 }
 
-bool StreamlineHooks::SyncNativeVulkanDlssgMenu(bool overlayWillRender)
+bool StreamlineHooks::SyncNativeVulkanDlssgMenu(bool overlayWillRender, bool nativePresentBoundary)
 {
     if (!IsNativeVulkanDlssg())
         return true;
 
-    std::lock_guard lock(dlssgOptionsMutex);
+    // SetOptions/GetState hold this mutex across the runtime call, which can wait for its
+    // presentation worker. Never block that worker here waiting for the caller in turn.
+    std::unique_lock lock(dlssgOptionsMutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return !overlayWillRender;
     auto& state = State::Instance();
     const bool menuInterlockActive =
         MenuOverlayBase::IsVisible() && (state.swapchainApi == API::Vulkan || state.menuOverlayIsVulkan);
@@ -1974,17 +1980,18 @@ bool StreamlineHooks::SyncNativeVulkanDlssgMenu(bool overlayWillRender)
     if (!state.nativeVulkanDlssgRequested)
         return nativeVulkanDlssgMenuStateKnown;
 
-    // A future options struct must be passed through untouched. Without a complete cache we cannot
-    // replay the game's request to pause DLSS-G safely, so keep the overlay away while the menu is open.
+    // Passive overlays at the verified driver WSI boundary wait the output image's present
+    // semaphores. They do not reuse DLSS-G's tagged inputs or require an options replay.
+    // Unknown options remain opaque; an interactive menu still requires a successful pause.
     if (!lastDlssgOptionsReplayable)
-        return !overlayWillRender;
+        return !overlayWillRender || (nativePresentBoundary && !menuInterlockActive);
 
     if (!o_slDLSSGSetOptions)
         return false;
 
-    // FPS counters and toasts also render while the main menu is closed. Do not pause FG
-    // permanently for these overlays, and do not write an image still used by native FG.
-    const bool canDrawOverlay = !overlayWillRender || menuInterlockActive;
+    // Only the validated native WSI path may keep drawing passive overlays with FG enabled.
+    // Other callers retain the conservative gate. Opening the menu still pauses FG below.
+    const bool canDrawOverlay = !overlayWillRender || menuInterlockActive || nativePresentBoundary;
     if (nativeVulkanDlssgMenuStateKnown && nativeVulkanDlssgMenuPaused == menuInterlockActive)
         return canDrawOverlay;
 

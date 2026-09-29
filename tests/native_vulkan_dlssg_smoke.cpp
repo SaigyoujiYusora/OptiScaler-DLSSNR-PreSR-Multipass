@@ -9,6 +9,9 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include <future>
+#include <mutex>
+#include <thread>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -523,7 +526,8 @@ static void TestPluginLoadAndNativeState()
            "native Vulkan plugin load did not preserve the real JSON pointer/hooks");
 
     const auto status = StreamlineHooks::GetNativeVulkanDlssgStatus();
-    Expect(status.active && !status.optionsSeen && !status.requested && !status.lastResult.has_value(),
+    Expect(status.active && !status.optionsSeen && !status.requested && !status.lastResult.has_value() &&
+               status.available,
            "native Vulkan status snapshot was not read from the real state");
 
     sl::DLSSGState state {};
@@ -534,6 +538,35 @@ static void TestPluginLoadAndNativeState()
            "native Vulkan GetState result changed");
     Expect(Mock::stateCalls == beforeCalls + 1 && state.numFramesActuallyPresented == 17,
            "native Vulkan GetState did not preserve the real state");
+}
+
+static void TestOptionsLockBusyIsBounded()
+{
+    ResetState();
+    State::Instance().nativeVulkanDlssg = true;
+    State::Instance().nativeVulkanDlssgOptionsSeen = true;
+    State::Instance().nativeVulkanDlssgRequested = true;
+    const auto optionsCalls = Mock::optionsCalls;
+    const auto stateCalls = Mock::stateCalls;
+    std::promise<void> acquired;
+    std::promise<void> release;
+    auto releaseFuture = release.get_future();
+    std::thread holder(
+        [&]
+        {
+            std::unique_lock lock(StreamlineHooks::dlssgOptionsMutex);
+            acquired.set_value();
+            releaseFuture.wait();
+        });
+    acquired.get_future().wait();
+    Expect(StreamlineHooks::IsNativeVulkanDlssg(), "native atomic route changed while options lock was held");
+    const auto status = StreamlineHooks::GetNativeVulkanDlssgStatus();
+    Expect(!status.available, "busy options lock reported an available status snapshot");
+    Expect(!StreamlineHooks::SyncNativeVulkanDlssgMenu(true, true), "busy options lock allowed a worker overlay draw");
+    Expect(Mock::optionsCalls == optionsCalls && Mock::stateCalls == stateCalls,
+           "busy options lock entered Streamline runtime calls");
+    release.set_value();
+    holder.join();
 }
 
 static void TestMarkerForwarding()
@@ -586,11 +619,25 @@ static void TestOptionsVersionsAndMenuReplay()
                    Mock::lastOptions.numFramesToGenerate == options.numFramesToGenerate &&
                    Mock::lastOptions.flags == options.flags,
                "native Vulkan Auto/count/flags request was modified");
+
+        const auto fpsOptionsCalls = Mock::optionsCalls;
+        const auto fpsStateCalls = Mock::stateCalls;
+        for (unsigned frame = 0; frame < 120; ++frame)
+            Expect(StreamlineHooks::SyncNativeVulkanDlssgMenu(false, false),
+                   "FPS menu bookkeeping unexpectedly blocked a frame");
+        for (unsigned frame = 0; frame < 120; ++frame)
+            Expect(StreamlineHooks::SyncNativeVulkanDlssgMenu(true, true),
+                   "verified native present boundary blocked a passive overlay");
+        Expect(!StreamlineHooks::SyncNativeVulkanDlssgMenu(true, false),
+               "unverified overlay was allowed while native DLSSG was active");
+        Expect(Mock::optionsCalls == fpsOptionsCalls && Mock::stateCalls == fpsStateCalls,
+               "FPS/passive overlay path issued extra DLSSG options or state calls");
+
         Mock::originalResult = sl::Result::eErrorInvalidState;
 
         MenuOverlayBase::visible = true;
         Mock::optionsCalls = 0;
-        Expect(!StreamlineHooks::SyncNativeVulkanDlssgMenu(true),
+        Expect(!StreamlineHooks::SyncNativeVulkanDlssgMenu(true, true),
                "native Vulkan menu sync hid the original Streamline error");
         Expect(Mock::optionsCalls == 1 && Mock::lastOptions.mode == sl::DLSSGMode::eOff &&
                    static_cast<uint32_t>(Mock::lastOptions.flags & sl::DLSSGFlags::eRetainResourcesWhenOff) != 0,
@@ -598,7 +645,7 @@ static void TestOptionsVersionsAndMenuReplay()
 
         MenuOverlayBase::visible = false;
         Mock::originalResult = sl::Result::eOk;
-        Expect(StreamlineHooks::SyncNativeVulkanDlssgMenu(false), "menu restore sync failed");
+        Expect(StreamlineHooks::SyncNativeVulkanDlssgMenu(true, true), "menu restore sync failed");
         Expect(Mock::optionsCalls == 2 && std::memcmp(Mock::lastOptionsBytes.data(), &options, bytes) == 0,
                "menu close did not restore the original game options");
     }
@@ -615,7 +662,11 @@ static void TestOptionsVersionsAndMenuReplay()
     const auto calls = Mock::optionsCalls;
     MenuOverlayBase::visible = true;
     Expect(!StreamlineHooks::SyncNativeVulkanDlssgMenu(true), "unknown options allowed an overlay GPU write");
+    Expect(!StreamlineHooks::SyncNativeVulkanDlssgMenu(true, true),
+           "unknown options allowed a menu overlay at the verified boundary");
     MenuOverlayBase::visible = false;
+    Expect(StreamlineHooks::SyncNativeVulkanDlssgMenu(true, true),
+           "unknown options blocked a verified passive native overlay");
     Expect(StreamlineHooks::SyncNativeVulkanDlssgMenu(false), "unknown options blocked menu close bookkeeping");
     Expect(Mock::optionsCalls == calls, "unknown/chained options were replayed across menu frames");
 
@@ -632,7 +683,11 @@ static void TestOptionsVersionsAndMenuReplay()
     const auto chainedCalls = Mock::optionsCalls;
     MenuOverlayBase::visible = true;
     Expect(!StreamlineHooks::SyncNativeVulkanDlssgMenu(true), "chained options allowed an overlay GPU write");
+    Expect(!StreamlineHooks::SyncNativeVulkanDlssgMenu(true, true),
+           "chained options allowed a menu overlay at the verified boundary");
     MenuOverlayBase::visible = false;
+    Expect(StreamlineHooks::SyncNativeVulkanDlssgMenu(true, true),
+           "chained options blocked a verified passive native overlay");
     Expect(StreamlineHooks::SyncNativeVulkanDlssgMenu(false), "chained options blocked menu close bookkeeping");
     Expect(Mock::optionsCalls == chainedCalls, "chained options were replayed across menu frames");
 }
@@ -643,6 +698,7 @@ int main()
     TestNativeScopeGuard();
     TestVulkanResourceCalls();
     TestPluginLoadAndNativeState();
+    TestOptionsLockBusyIsBounded();
     TestMarkerForwarding();
     TestOptionsVersionsAndMenuReplay();
     std::puts(
