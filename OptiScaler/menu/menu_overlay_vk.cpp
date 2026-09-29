@@ -655,9 +655,21 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     // be skipped, but the next NewFrame must never observe an unrendered frame.
     ImGui::Render();
 
-    const bool nativePassiveBoundary =
-        verifiedWsi && StreamlineHooks::IsNativeVulkanDlssg() && !MenuOverlayBase::IsVisible();
-    if ((State::Instance().delayMenuRenderBy != 0 && !nativePassiveBoundary) || !nativeFgAllowsOverlay)
+    // WSI validation is independent of catching slInit. Late injection can miss that
+    // call, while the legacy DLSSG options hook still resets the menu delay each frame.
+    // Passive drawing at this verified output boundary does not need the route flag.
+    const bool verifiedPassiveBoundary = verifiedWsi && !MenuOverlayBase::IsVisible();
+    if (State::Instance().delayMenuRenderBy != 0 && verifiedPassiveBoundary)
+    {
+        static bool reportedDelayBypass = false;
+        if (!reportedDelayBypass)
+        {
+            LOG_INFO("Vulkan overlay: passive WSI output bypasses legacy menu delay; native SL init detected: {}",
+                     StreamlineHooks::IsNativeVulkanDlssg());
+            reportedDelayBypass = true;
+        }
+    }
+    if ((State::Instance().delayMenuRenderBy != 0 && !verifiedPassiveBoundary) || !nativeFgAllowsOverlay)
         return true;
 
     ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[imageIndex];
@@ -744,6 +756,16 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     // Only replace the application's present wait list after the overlay submit succeeded.
     pPresentInfo->waitSemaphoreCount = 1;
     pPresentInfo->pWaitSemaphores = &_ImVulkan_Semaphores[imageIndex];
+
+    if (verifiedPassiveBoundary)
+    {
+        static bool reportedPassiveSubmit = false;
+        if (!reportedPassiveSubmit)
+        {
+            LOG_INFO("Vulkan overlay: passive overlay submitted on verified WSI output");
+            reportedPassiveSubmit = true;
+        }
+    }
 
     return true;
 }

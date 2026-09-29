@@ -93,7 +93,8 @@ class StreamlineHooks
 {
   public:
     static bool SyncNativeVulkanDlssgMenu(bool, bool = false) { return allowOverlay; }
-    static bool IsNativeVulkanDlssg() { return true; }
+    static bool IsNativeVulkanDlssg() { return nativeRoute; }
+    static inline bool nativeRoute = true;
     static inline bool allowOverlay = true;
 };
 
@@ -311,6 +312,21 @@ int main()
     Expect(Fake::submitCalls == 1 && Fake::submittedCommandBuffer == frames[0].CommandBuffer,
            "verified passive overlay did not submit using the present image");
 
+    // Late injection may miss slInit, leaving the route flag false even though the
+    // independently verified WSI boundary is valid. Legacy SetOptions keeps resetting
+    // the menu delay while FG is on; passive overlays must not starve indefinitely.
+    StreamlineHooks::nativeRoute = false;
+    for (unsigned frame = 0; frame < 120; ++frame)
+    {
+        State::Instance().delayMenuRenderBy = 10;
+        chain.waitSemaphoreCount = static_cast<uint32_t>(waits.size());
+        chain.pWaitSemaphores = waits.data();
+        Fake::Reset();
+        Expect(MenuOverlayVk::QueuePresent(actualQueue, &chain), "late-injection passive present failed");
+        Expect(Fake::submitCalls == 1 && Fake::submittedQueue == actualQueue,
+               "missed slInit starved a verified passive overlay behind the legacy menu delay");
+    }
+
     VulkanHooks::presentVerified = false;
     State::Instance().delayMenuRenderBy = 10;
     chain.waitSemaphoreCount = 0;
@@ -327,6 +343,7 @@ int main()
     Fake::Reset();
     Expect(MenuOverlayVk::QueuePresent(actualQueue, &chain), "visible menu delay broke application present");
     Expect(Fake::submitCalls == 0, "visible menu delay submitted GPU work");
+    StreamlineHooks::nativeRoute = true;
 
     // Invalid image/swapchain/queue must return without recording or submitting.
     imageIndex = 9;
