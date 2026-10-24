@@ -14,6 +14,7 @@ try {
     & "$PSScriptRoot/mfg_unlock/run.ps1"
     & "$PSScriptRoot/run_nr_pipeline_capture.ps1"
     & "$PSScriptRoot/run_nr_streamline_hooks.ps1"
+    & "$PSScriptRoot/run_nr_menu_overlay.ps1"
     function RunSmoke($name, $libraries, $arguments = @(), $includes = @()) {
         $exe = Join-Path $out "$name.exe"
         & cl.exe /nologo /std:c++20 /EHsc /DNOMINMAX "/Fo$out/$name.obj" "/Fe$exe" @includes "$PSScriptRoot/$name.cpp" @libraries

@@ -126,8 +126,13 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     const bool specializedNr =
         NeuralRendering && NeuralRendering->ProcessSeam(InCommandList, InParameters, true, timingQueue,
                                                         rayReconstruction, submissionEpoch, interop, GetFeatureFlags());
+    // Denoise first owns both ordinary seams on the native DX12 route: the game's upscaler at 1:1,
+    // NR on that clean image, then a second step chosen in the menu. It replaces pre- and post-NR.
+    const bool denoiseFirst =
+        NeuralRendering && !specializedNr && !interop && Config::Instance()->DlssNrEnabled.value_or_default() &&
+        Config::Instance()->DlssNrDenoiseFirst.value_or_default() && DlssNr::CanRunBeforeUpscale_Dx12(InParameters);
     const bool nrBeforeUpscale =
-        NeuralRendering && !specializedNr && Config::Instance()->DlssNrEnabled.value_or_default() &&
+        NeuralRendering && !specializedNr && !denoiseFirst && Config::Instance()->DlssNrEnabled.value_or_default() &&
         Config::Instance()->DlssNrRunBeforeSr.value_or_default() && DlssNr::CanRunBeforeUpscale_Dx12(InParameters);
 
     // Order is important as that's the order of shader dispatch
@@ -231,7 +236,10 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
               } });
     }
 
-    if (NeuralRendering && !specializedNr && !nrBeforeUpscale && Config::Instance()->DlssNrEnabled.value_or_default())
+    // The ordinary post-upscale pass; the capture stages below follow the same decision.
+    const bool nrAfterUpscale = NeuralRendering && !specializedNr && !nrBeforeUpscale && !denoiseFirst &&
+                                Config::Instance()->DlssNrEnabled.value_or_default();
+    if (nrAfterUpscale)
     {
         pipeline.push_back(MakeDlssNrPass(*NeuralRendering, Device, InCommandList, InParameters, false,
                                           GetFeatureFlags(), timingQueue, interop, rayReconstruction, submissionEpoch));
@@ -282,7 +290,9 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     auto* currentTarget = SetupShaderPipeline(pipeline, paramOutput);
     SetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Output, currentTarget);
     auto* originalColor = GetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Color);
-    const bool diagnoseNr = nrBeforeUpscale && !interop;
+    // The pipeline capture (Ctrl+F8) follows every native NR placement, including the post-upscale
+    // pass, so captures of the three placements can be compared against each other.
+    const bool diagnoseNr = (nrBeforeUpscale || denoiseFirst || nrAfterUpscale) && !interop;
     if (diagnoseNr)
         NeuralRendering->DiagnosePipeline(0, InCommandList, InParameters, originalColor, GetFeatureFlags(),
                                           rayReconstruction);
@@ -291,6 +301,40 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
         if (auto* nrInput = PrepareDlssNrInput(*NeuralRendering, Device, InCommandList, InParameters, GetFeatureFlags(),
                                                timingQueue, interop, rayReconstruction, submissionEpoch))
             SetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Color, nrInput);
+    }
+    // An un-jittered colour handed to the game's upscale must be declared as such, and the game's
+    // own jitter put back afterwards whatever happens in between.
+    struct ZeroJitter
+    {
+        NVSDK_NGX_Parameter* params;
+        float x = 0, y = 0;
+        bool active = false;
+        void Apply()
+        {
+            // Only override a jitter the game actually set, so the table is left exactly as found.
+            active = params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &x) == NVSDK_NGX_Result_Success &&
+                     params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &y) == NVSDK_NGX_Result_Success;
+            if (!active)
+                return;
+            params->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
+            params->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
+        }
+        ~ZeroJitter()
+        {
+            if (!active)
+                return;
+            params->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, x);
+            params->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, y);
+        }
+    } zeroJitter { InParameters };
+    if (denoiseFirst)
+    {
+        const auto handoff = NeuralRendering->DenoiseFirstBefore(InCommandList, InParameters, GetFeatureFlags(),
+                                                                 timingQueue, rayReconstruction, submissionEpoch);
+        if (handoff.color)
+            SetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Color, handoff.color);
+        if (handoff.zeroJitter)
+            zeroJitter.Apply();
     }
     if (diagnoseNr)
     {
@@ -301,15 +345,30 @@ bool IFeature_Dx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX
     UpscalerTime->Start(InCommandList);
     const bool evalResult = EvaluateInternal(InCommandList, InParameters);
     UpscalerTime->End(InCommandList);
+    if (denoiseFirst)
+        NeuralRendering->DenoiseFirstAfter(InCommandList, InParameters, currentTarget, evalResult);
     if (diagnoseNr)
         NeuralRendering->DiagnosePipeline(2, InCommandList, InParameters, currentTarget, GetFeatureFlags(),
-                                          rayReconstruction, evalResult);
+                                          rayReconstruction, evalResult, !nrAfterUpscale);
     SetUpscalerResource_Dx12(InParameters, NVSDK_NGX_Parameter_Color, originalColor);
 
-    if (!evalResult)
-        return false;
+    // Stage 3 must always close a frame that stage 2 left open, even when nothing ran.
+    const auto finishCapture = [&](bool dispatched)
+    {
+        if (diagnoseNr && nrAfterUpscale)
+            NeuralRendering->DiagnosePipeline(3, InCommandList, InParameters, paramOutput, GetFeatureFlags(),
+                                              rayReconstruction, dispatched);
+    };
 
-    if (!DispatchShaderPipeline(pipeline))
+    if (!evalResult)
+    {
+        finishCapture(false);
+        return false;
+    }
+
+    const bool dispatched = DispatchShaderPipeline(pipeline);
+    finishCapture(dispatched);
+    if (!dispatched)
         return true;
 
     // imgui

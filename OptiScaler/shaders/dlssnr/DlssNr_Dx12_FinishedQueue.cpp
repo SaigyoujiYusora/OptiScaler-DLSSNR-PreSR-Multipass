@@ -7,6 +7,11 @@ auto DlssNr_Dx12::State::FinishedPictureResetCommandList(ID3D12CommandList* cmd)
     std::lock_guard<std::recursive_mutex> lock(mutex);
     lifetime.ResetRecording(cmd);
     deferredSr.lifetime.ResetRecording(cmd);
+    denoiseFirst.lifetime.ResetRecording(cmd);
+    if (denoiseFirst.denoiseTime)
+        denoiseFirst.denoiseTime->ResetRecording(cmd);
+    if (denoiseFirst.enlargeTime)
+        denoiseFirst.enlargeTime->ResetRecording(cmd);
     captureFrames.ResetRecording(cmd);
     if (enlarger)
         enlarger->lifetime.ResetRecording(cmd);
@@ -79,6 +84,11 @@ auto DlssNr_Dx12::State::FinishedPictureSubmitted(ID3D12CommandQueue* queue, UIN
     std::lock_guard<std::recursive_mutex> lock(mutex);
     lifetime.Submitted(queue, count, lists);
     deferredSr.lifetime.Submitted(queue, count, lists);
+    denoiseFirst.lifetime.Submitted(queue, count, lists);
+    if (denoiseFirst.denoiseTime)
+        denoiseFirst.denoiseTime->Submitted(queue, count, lists);
+    if (denoiseFirst.enlargeTime)
+        denoiseFirst.enlargeTime->Submitted(queue, count, lists);
     captureFrames.Submitted(queue, count, lists);
     if (enlarger)
         enlarger->lifetime.Submitted(queue, count, lists);

@@ -27,9 +27,9 @@
 #include <shaders/Shader_Dx12.h>
 #include <shaders/Shader_Dx12Utils.h>
 
-// A maximal spatial frame uses 11 codec dispatches: meter 2, encode 1, pack 2, clamps 2,
-// unpack 1, private enlargement 2 and resolve 1. Twelve queued frames need 132 slots.
-#define DLSSNR_NUM_OF_HEAPS 132
+// A maximal spatial frame uses 12 codec dispatches: meter 2, encode 1, pack 2, clamps 2,
+// halo filter 1, unpack 1, private enlargement 2 and resolve 1. Twelve queued frames need 144 slots.
+#define DLSSNR_NUM_OF_HEAPS 144
 
 class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
 {
@@ -65,6 +65,8 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12PipelineState* _finishedColorPipelineState = nullptr;
     ID3D12PipelineState* _spatialPipelineState = nullptr;
     ID3D12PipelineState* _spatialGuidesPipelineState = nullptr;
+    // Denoise-first step 2: resample NR's edit by the jitter and put it onto the raw render.
+    ID3D12PipelineState* _denoiseFirstPipelineState = nullptr;
 
     // Caller holds the owner and state locks. All NR compute shaders share this descriptor layout.
     bool DispatchCompute(ID3D12GraphicsCommandList* cmd, const DlssNrConstants& constants,
@@ -96,8 +98,10 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     void SetBufferState(ID3D12GraphicsCommandList* cmdList, D3D12_RESOURCE_STATES state);
     ID3D12Resource* Buffer();
     bool CanRender() const;
+    // Stages: 0 arms and records the raw colour, 1 what the upscaler receives, 2 the upscaler output,
+    // 3 the output after a post-upscale NR pass. Stage 2 closes the frame unless `last` is false.
     void DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params,
-                          ID3D12Resource* color, uint32_t flags, bool rr, bool success = true);
+                          ID3D12Resource* color, uint32_t flags, bool rr, bool success = true, bool last = true);
     void BeginInputHold(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                         const D3D12_RESOURCE_STATES* inputStates);
     void EndInputHold(NVSDK_NGX_Parameter* params);
@@ -112,6 +116,26 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     void ApplyFinishedDx11(IDXGISwapChain* swapchain);
     std::string FinishedStatus();
     std::string DeferredStatus();
+
+    // Denoise first: the game's upscaler at 1:1 on the raw render, NR on that clean image, then one
+    // of three second steps. Before() runs at the pre-upscale seam and says what the game's upscale
+    // should consume; After() runs once the game's upscale has written its output.
+    struct DenoiseFirstHandoff
+    {
+        ID3D12Resource* color = nullptr; // colour the game's upscale should read instead of Color; null = unchanged
+        bool zeroJitter = false;         // that colour is un-jittered, so the upscale must be told jitter 0
+        bool replaceOutput = false;      // After() overwrites the upscaler output with a private upscale
+    };
+    DenoiseFirstHandoff DenoiseFirstBefore(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params,
+                                           uint32_t featureFlags, ID3D12CommandQueue* queue, bool rayReconstruction,
+                                           unsigned long long submissionEpoch);
+    void DenoiseFirstAfter(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params, ID3D12Resource* output,
+                           bool upscaled);
+    std::string DenoiseStatus();
+
+    // One pass of dlssnr_denoise_first.hlsl: raw render + (NR output, clean image) -> composite.
+    bool DispatchDenoiseFirstPass(ID3D12GraphicsCommandList* cmd, const DlssNrConstants& constants, ID3D12Resource* raw,
+                                  ID3D12Resource* model, ID3D12Resource* clean, ID3D12Resource* target);
 
     // Records one pass. Resources that a given mode does not read may be null; a stand-in is bound in
     // their place so every descriptor in the table is valid.
