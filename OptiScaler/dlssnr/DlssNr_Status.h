@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 class Config;
 
@@ -35,6 +36,7 @@ struct ControlRequests
 void PublishStatus(const void* owner, Backend backend, const StatusSnapshot& status);
 void ClearStatus(const void* owner);
 StatusSnapshot ReadStatus(Backend backend);
+std::string LocalizeStatus(std::string_view text);
 ControlRequests ReadControlRequests();
 
 void RenderMenu(::Config* config, float menuResScale);

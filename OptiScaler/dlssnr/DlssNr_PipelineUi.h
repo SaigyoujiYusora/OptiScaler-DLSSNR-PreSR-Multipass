@@ -38,7 +38,7 @@ struct View
 
 inline const char* SectionName(Section section)
 {
-    static constexpr const char* names[] = { "Placement", "Input", "Model passes", "Apply NR edit" };
+    static constexpr const char* names[] = { "位置", "输入", "模型层", "应用 NR 编辑" };
     return names[(int) section];
 }
 
@@ -67,21 +67,21 @@ inline void DrawTimingBar(double nrMs, double frameMs)
 {
     if (!std::isfinite(nrMs) || nrMs < 0.0 || !std::isfinite(frameMs) || frameMs <= 0.0)
     {
-        ImGui::TextDisabled("Waiting for frame timing.");
+        ImGui::TextDisabled("等待帧计时。");
         return;
     }
     const double remaining = std::max(frameMs - nrMs, 0.0);
     const bool overlapping = nrMs > frameMs;
-    ImGui::TextWrapped("NR %.2f ms  |  Rest of frame ~%.2f ms", nrMs, remaining);
+    ImGui::TextWrapped("NR %.2f ms  |  帧剩余时间约 %.2f ms", nrMs, remaining);
     const auto text = ImGui::GetStyleColorVec4(ImGuiCol_Text);
     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(text.x * 0.20f, text.y * 0.55f, text.z * 0.25f, text.w));
     ImGui::ProgressBar(float(nrMs / std::max(frameMs, nrMs)), ImVec2(-1.0f, ImGui::GetFontSize()), "");
     ImGui::PopStyleColor();
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("NR GPU time versus frame interval. Work can overlap.");
+        ImGui::SetTooltip("NR GPU 时间与帧间隔的对比。两者可能重叠执行。");
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextDisabled("Rendered frame: %.2f ms%s", frameMs,
-                        overlapping ? " (NR overlaps/exceeds this interval)" : "");
+    ImGui::TextDisabled("渲染帧：%.2f ms%s", frameMs,
+                        overlapping ? "（NR 与该间隔重叠或超出）" : "");
     ImGui::PopTextWrapPos();
 }
 
@@ -114,15 +114,15 @@ inline void Draw(const View& view, Section& selected)
         int section = -1;
     };
     const Label labels[] = {
-        { "Game input", "Placement / routing", (int) Section::Placement },
-        { view.rayReconstruction ? "RR + Super Resolution" : "Super Resolution",
-          split ? "Clean game image" : "Game upscaler" },
-        { "Game effects + HUD", "Game rendering" },
-        { "Prepare NR input", "HDR / paper white / " + std::to_string(view.scalePercent) + "%", (int) Section::Input },
-        { "NR model", std::to_string(view.passes) + (view.passes == 1 ? " pass" : " passes"), (int) Section::Model },
-        { "Apply NR edit", view.applyModel ? "Strength / skin" : "Edit hidden; model runs", (int) Section::Blend },
-        { "Upscale NR edit", std::string("Separate ") + view.privateUpscaler + " pass (no RR)" },
-        { "Game output", "FG / presentation" }
+        { "游戏输入", "位置 / 路由", (int) Section::Placement },
+        { view.rayReconstruction ? "RR + 超分辨率" : "超分辨率",
+          split ? "干净游戏图像" : "游戏放大器" },
+        { "游戏效果 + HUD", "游戏渲染" },
+        { "准备 NR 输入", "HDR / 纸白 / " + std::to_string(view.scalePercent) + "%", (int) Section::Input },
+        { "NR 模型", std::to_string(view.passes) + (view.passes == 1 ? " 层" : " 层"), (int) Section::Model },
+        { "应用 NR 编辑", view.applyModel ? "强度 / 皮肤" : "编辑已隐藏；模型仍运行", (int) Section::Blend },
+        { "放大 NR 编辑", std::string("独立 ") + view.privateUpscaler + " 层（无 RR）" },
+        { "游戏输出", "FG / 呈现" }
     };
     // Parents encode the two branches directly; ordinary routes are simple ordered stages.
     struct Node
@@ -249,11 +249,11 @@ inline void Draw(const View& view, Section& selected)
     };
     if (!view.enabled)
     {
-        tool("Prepare input", Section::Input);
+        tool("准备输入", Section::Input);
         ImGui::SameLine();
-        tool("Model passes", Section::Model);
+        tool("模型层", Section::Model);
         ImGui::SameLine();
-        tool("Apply edit", Section::Blend);
+        tool("应用编辑", Section::Blend);
     }
     ImGui::PopID();
 }

@@ -64,8 +64,8 @@ void RenderNrCompareTags()
 
     // The left side is the untouched frame unless swapped -- matching the shader's
     // showOriginal = (uv.x < split) != swap.
-    const char* leftText = swap ? "DLSS NR : ON" : "DLSS NR : OFF";
-    const char* rightText = swap ? "DLSS NR : OFF" : "DLSS NR : ON";
+    const char* leftText = swap ? "DLSS NR：开启" : "DLSS NR：关闭";
+    const char* rightText = swap ? "DLSS NR：关闭" : "DLSS NR：开启";
 
     ImDrawList* dl = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
     ImFont* font = ImGui::GetFont();

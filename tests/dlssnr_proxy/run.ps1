@@ -12,7 +12,7 @@ if ([IO.Path]::GetFileName($Compiler) -match 'g\+\+|clang\+\+') {
         "-I$repo/external/nvngx_dlss_sdk" "-I$repo/external/vulkan/include" `
         "$PSScriptRoot/ProxyTests.cpp" -o "$build/ProxyTests.exe"
 } else {
-    & $Compiler /nologo /std:c++20 /EHsc /W4 "/FI$PSScriptRoot/MockNgx.h" "/I$build" `
+    & $Compiler /nologo /utf-8 /std:c++20 /EHsc /W4 "/FI$PSScriptRoot/MockNgx.h" "/I$build" `
         "/I$repo/external/nvngx_dlss_sdk" "/I$repo/external/vulkan/include" `
         "/Fo$build/ProxyTests.obj" "/Fe$build/ProxyTests.exe" "$PSScriptRoot/ProxyTests.cpp"
 }
