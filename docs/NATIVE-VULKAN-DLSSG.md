@@ -24,19 +24,43 @@ Enable DLSS Frame Generation in the game's settings. The OptiScaler menu reports
 
 The existing Vulkan menu interlock is retained: opening the OptiScaler menu pauses DLSSG while retaining resources; closing it restores the game's original request, including Auto mode. Replay occurs on the Vulkan present thread, not from a UI control callback. A failed pause must not permit overlay writes to a potentially busy swapchain image. Unknown options versions or caller-owned extension chains are not cached for later replay.
 
-With the main menu closed, FPS and notification overlays can remain visible without pausing native FG. This is limited to recognized native WSI paths: before installing hooks, GetSwapchainImagesKHR must resolve to nvoglv64.dll; CreateSwapchainKHR and QueuePresentKHR must belong either to that same driver module or to the same OBS graphics-hook64.dll module exposing OBS_Negotiate. The overlay obtains images through that verified query function and checks the swapchain, image index and registered graphics queue before drawing. Unsupported layers or queues are skipped instead of treating Streamline's offscreen input images as output images.
+With the main menu closed, FPS and notification overlays can remain visible without pausing native FG.
+The overlay binds a complete per-device WSI dispatch obtained from the original Vulkan loader resolver.
+Streamline's input swapchain proxies come from its separate interposer resolver; they are excluded.
+Ordinary transparent layers in the native loader chain are supported without DLL names, hashes or version lists.
 
-The overlay waits every semaphore from the current VkPresentInfoKHR at ALL_COMMANDS, submits on the actual presenting graphics queue, then replaces the present waits with its own completion semaphore for that swapchain image. It does not query DLSSG state again, cast its opaque input-completion fence, or run NR on generated frames. Unknown options and extension chains remain untouched: passive overlays at the verified output boundary are allowed, but an interactive menu is withheld if the original options cannot be safely paused and restored.
+Device registration captures CreateSwapchain, DestroySwapchain, QueuePresent and GetSwapchainImages together.
+Hook installation uses that exact snapshot rather than resolving a second set. A device becomes bound only
+after the hook transaction succeeds. A later device sharing those hook targets can bind; different targets
+are rejected rather than routed through the first device's global trampolines. Known Streamline interposer
+or plugin entry points, including recognized detour targets, are rejected.
 
-Passive overlays bypass the legacy menu delay based on the verified WSI boundary, even if OptiScaler loaded too late to observe slInit. The native Streamline route flag is not required for this output-only draw. The log records the first delay bypass and successful passive submission at Info level; the main menu still obeys its delay and FG interlock.
+Only a successful raw CreateSwapchain call records a swapchain with its device and surface. The image list
+is enumerated through the same device dispatch and confirmed nonempty, nonnull and unique before passive
+drawing is enabled. Present must use the recorded swapchain, its actual graphics/present queue and family,
+and a valid image index. The overlay waits all incoming semaphores at ALL_COMMANDS, then forwards its own
+completion semaphore while preserving pNext and pResults. Submit failures disable drawing until recreation.
 
-The boundary follows NVIDIA's [Streamline manual Vulkan hooking guide, section 4.2](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideManualHooking.md#42-vulkan), which separates native Vulkan entry points from the swapchain/present proxies exported by sl.interposer.dll. See also the [DLSSG Vulkan synchronization and swapchain guidance](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md). The supported path does not claim compatibility with arbitrary third-party Vulkan layers or inline hooks.
+The original loader resolver and its Detours target are tied to the loaded vulkan-1 module. This identifies
+the native loader chain below normal Streamline WSI proxies, not an arbitrary third-party virtual-swapchain
+implementation. Surface/size/image self-consistency alone is not treated as evidence of an FG output.
+No upper-layer opaque handle is passed directly to an ICD for speculative validation.
 
-The recognized [OBS Vulkan capture layer](https://github.com/obsproject/obs-studio/blob/343ae6015a976a7518d5f5635080ea9add69a65d/plugins/win-capture/graphics-hook/vulkan-capture.c) forwards native swapchain handles and does not replace GetSwapchainImagesKHR. Its present wrapper captures on the presenting queue and forwards the same present information. A local RTX 4080 SUPER device probe found this OBS/NVIDIA entry-point combination; that probe validates module routing, not Endfield or DLSSG rendering.
+The legacy menu-delay bypass is based on this bound native chain and closed-menu state, independently of
+whether slInit was observed. Interactive menus still pause native FG; closing restores the game's request.
+See NVIDIA's [manual Vulkan hooking guide, section 4.2](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideManualHooking.md#42-vulkan)
+for the distinction between native loader entries and Streamline input-swapchain proxies.
 
 The menu reports API results rather than claiming frame generation is active just because an option was selected. Actual frame synthesis still depends on the game's integration and the NVIDIA runtime accepting its requests.
 
 ## Validation and game test
+
+The earlier No Man's Sky workaround recognized one OBS/Steam DLL combination. It has been replaced by
+native loader dispatch provenance and object lifetime validation; no Steam version pin remains.
+The tests in `run_vulkan_overlay.ps1` exercise the production dispatch helper, registry and hook-binding
+functions with anonymous transparent callbacks, proxy contamination, failed transactions, multiple devices,
+raw versus unregistered proxy swapchains, invalid image arrays, wrong queues, destruction and presentation.
+They also preserve existing image-index/semaphore forwarding and submit-failure cases.
 
 The regression runner `tests/run_native_vulkan_dlssg.ps1` exercises production hook bodies with controlled Streamline entry points. `tests/run_vulkan_overlay.ps1` extracts the production present submission and ImGui queue selection functions to check wait propagation, image/queue binding, invalid targets and failure handling. These tests are separate from an in-game test and do not load NVIDIA's model runtime.
 

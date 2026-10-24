@@ -20,11 +20,14 @@ class VulkanHooks
 
     static void RecordDevice(VkDevice device, VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* createInfo);
     static bool GetGraphicsQueue(VkDevice device, QueueInfo& info);
+    static bool GetDeviceContext(VkDevice device, VkPhysicalDevice& physicalDevice, VkInstance& instance);
     static bool GetPresentQueue(VkDevice device, VkQueue queue, VkSwapchainKHR swapchain, QueueInfo& info,
                                 bool* verifiedWsi = nullptr);
     static PFN_vkGetSwapchainImagesKHR GetSwapchainImages(VkDevice device, VkSwapchainKHR swapchain,
                                                           bool* verifiedWsi = nullptr);
     static bool IsVerifiedSwapchain(VkDevice device, VkSwapchainKHR swapchain);
+    static bool ConfirmSwapchainImages(VkDevice device, VkSwapchainKHR swapchain, const VkImage* images,
+                                        uint32_t count);
     static void RecordSwapchain(VkDevice device, VkSwapchainKHR swapchain, VkSurfaceKHR surface);
     static void ForgetSwapchain(VkDevice device, VkSwapchainKHR swapchain);
     static void ForgetDevice(VkDevice device);

@@ -115,7 +115,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     }
     LOG_DEBUG("Vulkan overlay: WSI boundary verified: {}", verifiedWsi);
 
-    // Get swapchain images through the same device WSI layer that created/presents this swapchain.
+    // Enumerate through the same native loader dispatch that created this swapchain.
     std::vector<VkImage> images;
     for (;;)
     {
@@ -143,6 +143,11 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
             images.resize(imageCount);
             break;
         }
+    }
+    if (!VulkanHooks::ConfirmSwapchainImages(device, *pSwapchain, images.data(), static_cast<uint32_t>(images.size())))
+    {
+        LOG_WARN("Vulkan overlay: swapchain images do not belong to a bound native loader chain");
+        return;
     }
     _scImageCount = static_cast<uint32_t>(images.size());
 

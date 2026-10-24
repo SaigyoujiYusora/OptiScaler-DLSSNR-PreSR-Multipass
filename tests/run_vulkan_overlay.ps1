@@ -32,6 +32,28 @@ Set-Content -LiteralPath "$out/native_vulkan_overlay_production.inc" `
     -Value (Extract 'OptiScaler/menu/menu_overlay_vk.cpp' 'bool MenuOverlayVk::QueuePresent(')
 Set-Content -LiteralPath "$out/imgui_present_queue_production.inc" `
     -Value (Extract 'OptiScaler/include/imgui/imgui_impl_vulkan.cpp' 'bool ImGui_ImplVulkan_SetPresentQueue(')
+$wsiSource = 'OptiScaler/hooks/Vulkan_Hooks.cpp'
+$wsiCode = @('template <typename T>' + (Extract $wsiSource 'uint64_t HandleKey('))
+$sourceText = Get-Content -LiteralPath "$repo/$wsiSource" -Raw
+foreach ($name in @('SwapchainState', 'DeviceState')) {
+    $match = [regex]::Match($sourceText, '(?s)struct ' + $name + '\s*\{.*?\n\};')
+    if (!$match.Success) { throw "Missing WSI state $name" }
+    $wsiCode += $match.Value
+}
+$wsiCode += @'
+std::mutex wsiMutex, wsiHookMutex;
+std::unordered_map<uint64_t, DeviceState> deviceStates;
+VulkanWsi::Dispatch installedWsi;
+'@
+foreach ($signature in @(
+    'bool VulkanHooks::GetDeviceContext(', 'bool VulkanHooks::GetGraphicsQueue(', 'bool VulkanHooks::GetPresentQueue(',
+    'PFN_vkGetSwapchainImagesKHR VulkanHooks::GetSwapchainImages(',
+    'bool VulkanHooks::IsVerifiedSwapchain(', 'void VulkanHooks::RecordSwapchain(',
+    'bool VulkanHooks::ConfirmSwapchainImages(', 'void VulkanHooks::ForgetSwapchain(',
+    'void VulkanHooks::ForgetDevice(', 'static void HookDevice(')) {
+    $wsiCode += Extract $wsiSource $signature
+}
+Set-Content -LiteralPath "$out/vulkan_wsi_production.inc" -Value ($wsiCode -join "`n")
 
 $savedPath = $env:PATH
 try {
@@ -53,6 +75,14 @@ try {
     if ($LASTEXITCODE) { throw 'ImGui present queue test compilation failed.' }
     & $backendExe
     if ($LASTEXITCODE) { throw 'ImGui present queue test failed.' }
+
+    $wsiExe = Join-Path $out 'native_vulkan_wsi.exe'
+    & $compilerPath /nologo /std:c++20 /EHsc /W4 `
+        "/I$out" "/I$repo/OptiScaler" "/I$repo/external/vulkan/include" "/Fe:$wsiExe" "/Fo$out/" `
+        "$PSScriptRoot/native_vulkan_wsi_smoke.cpp"
+    if ($LASTEXITCODE) { throw 'Vulkan WSI test compilation failed.' }
+    & $wsiExe
+    if ($LASTEXITCODE) { throw 'Vulkan WSI test failed.' }
 } finally {
     $env:PATH = $savedPath
 }
