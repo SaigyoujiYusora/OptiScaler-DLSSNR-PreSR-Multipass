@@ -172,6 +172,12 @@ int wmain(int argc, wchar_t** argv)
         Expect(stats.init == 1, "same-device owner unexpectedly reinitialized the fake runtime");
 
         NVSDK_NGX_Handle* feature = nullptr;
+        Expect(first->Create(static_cast<ID3D12GraphicsCommandList*>(nullptr), &parameters, &feature) ==
+                   NVSDK_NGX_Result_FAIL_InvalidParameter,
+               "Vulkan owner accepted a D3D12 Create call");
+        Expect(first->Evaluate(static_cast<ID3D12GraphicsCommandList*>(nullptr), nullptr, &parameters) ==
+                   NVSDK_NGX_Result_FAIL_InvalidParameter,
+               "Vulkan owner accepted a D3D12 Evaluate call");
         Expect(first->Create(commandBuffer, &parameters, &feature) == NVSDK_NGX_Result_Success,
                "Vulkan Create did not return success");
         Expect(feature != nullptr, "Vulkan Create returned no feature handle");

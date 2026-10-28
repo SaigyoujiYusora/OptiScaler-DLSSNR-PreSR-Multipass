@@ -6,6 +6,7 @@
 #include <nvsdk_ngx.h>
 #include <psapi.h>
 #include <algorithm>
+#include <cassert>
 #include <mutex>
 #include <map>
 #include <string>
@@ -489,8 +490,9 @@ CompatibilityRuntime::~CompatibilityRuntime()
 NVSDK_NGX_Result CompatibilityRuntime::Create(ID3D12GraphicsCommandList* commands, NVSDK_NGX_Parameter* params,
                                               NVSDK_NGX_Handle** feature)
 {
-    if (!module || vulkan || !module->dx12Create)
+    if (vulkan)
         return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    assert(module && module->dx12Create);
     std::lock_guard lock(module->mutex);
     CallerScope caller;
     return module->dx12Create(commands, (NVSDK_NGX_Feature) 18, params, feature);
@@ -499,8 +501,9 @@ NVSDK_NGX_Result CompatibilityRuntime::Create(ID3D12GraphicsCommandList* command
 NVSDK_NGX_Result CompatibilityRuntime::Create(VkCommandBuffer commands, NVSDK_NGX_Parameter* params,
                                               NVSDK_NGX_Handle** feature)
 {
-    if (!module || !vulkan || !module->vulkanCreate)
+    if (!vulkan)
         return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    assert(module && module->vulkanCreate);
     std::lock_guard lock(module->mutex);
     CallerScope caller;
     return module->vulkanCreate(commands, (NVSDK_NGX_Feature) 18, params, feature);
@@ -509,8 +512,9 @@ NVSDK_NGX_Result CompatibilityRuntime::Create(VkCommandBuffer commands, NVSDK_NG
 NVSDK_NGX_Result CompatibilityRuntime::Evaluate(ID3D12GraphicsCommandList* commands, const NVSDK_NGX_Handle* feature,
                                                 NVSDK_NGX_Parameter* params)
 {
-    if (!module || vulkan || !module->dx12Evaluate)
+    if (vulkan)
         return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    assert(module && module->dx12Evaluate);
     std::lock_guard lock(module->mutex);
     CallerScope caller;
     return module->dx12Evaluate(commands, feature, params, nullptr);
@@ -519,8 +523,9 @@ NVSDK_NGX_Result CompatibilityRuntime::Evaluate(ID3D12GraphicsCommandList* comma
 NVSDK_NGX_Result CompatibilityRuntime::Evaluate(VkCommandBuffer commands, const NVSDK_NGX_Handle* feature,
                                                 NVSDK_NGX_Parameter* params)
 {
-    if (!module || !vulkan || !module->vulkanEvaluate)
+    if (!vulkan)
         return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    assert(module && module->vulkanEvaluate);
     std::lock_guard lock(module->mutex);
     CallerScope caller;
     return module->vulkanEvaluate(commands, feature, params, nullptr);
@@ -528,14 +533,15 @@ NVSDK_NGX_Result CompatibilityRuntime::Evaluate(VkCommandBuffer commands, const 
 
 NVSDK_NGX_Result CompatibilityRuntime::Release(NVSDK_NGX_Handle* feature)
 {
-    if (!module)
-        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    assert(module);
     std::lock_guard lock(module->mutex);
     CallerScope caller;
-    if (vulkan && module->vulkanRelease)
+    if (vulkan)
+    {
+        assert(module->vulkanRelease);
         return module->vulkanRelease(feature);
-    if (!vulkan && module->dx12Release)
-        return module->dx12Release(feature);
-    return NVSDK_NGX_Result_FAIL_InvalidParameter;
+    }
+    assert(module->dx12Release);
+    return module->dx12Release(feature);
 }
 } // namespace DlssNr
