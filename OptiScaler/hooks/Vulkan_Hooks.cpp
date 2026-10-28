@@ -70,7 +70,6 @@ struct SwapchainState
 {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     bool verifiedWsi = false;
-    std::vector<VkImage> images;
 };
 
 struct DeviceState
@@ -192,7 +191,6 @@ void VulkanHooks::RecordDevice(VkDevice device, VkPhysicalDevice physicalDevice,
         if (queueCreate.flags != 0)
             continue;
 
-        const bool protectedQueue = (queueCreate.flags & VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT) != 0;
         for (uint32_t queueIndex = 0; queueIndex < queueCreate.queueCount; ++queueIndex)
         {
             VkQueue queue = VK_NULL_HANDLE;
@@ -205,7 +203,6 @@ void VulkanHooks::RecordDevice(VkDevice device, VkPhysicalDevice physicalDevice,
             info.familyIndex = queueCreate.queueFamilyIndex;
             info.queueIndex = queueIndex;
             info.flags = families[queueCreate.queueFamilyIndex].queueFlags;
-            info.protectedQueue = protectedQueue;
             recorded.queues.emplace(HandleKey(queue), info);
         }
     }
@@ -251,7 +248,7 @@ bool VulkanHooks::GetGraphicsQueue(VkDevice device, QueueInfo& info)
 
     for (const auto& [key, candidate] : deviceIt->second.queues)
     {
-        if (!candidate.protectedQueue && (candidate.flags & VK_QUEUE_GRAPHICS_BIT) != 0)
+        if ((candidate.flags & VK_QUEUE_GRAPHICS_BIT) != 0)
         {
             info = candidate;
             return true;
@@ -284,8 +281,7 @@ bool VulkanHooks::GetPresentQueue(VkDevice device, VkQueue queue, VkSwapchainKHR
         getSurfaceSupport = deviceIt->second.getSurfaceSupport;
     }
 
-    if (info.protectedQueue || (info.flags & VK_QUEUE_GRAPHICS_BIT) == 0 || !getSurfaceSupport ||
-        surface == VK_NULL_HANDLE)
+    if ((info.flags & VK_QUEUE_GRAPHICS_BIT) == 0 || !getSurfaceSupport || surface == VK_NULL_HANDLE)
         return false;
 
     VkBool32 supported = VK_FALSE;
@@ -325,7 +321,7 @@ void VulkanHooks::RecordSwapchain(VkDevice device, VkSwapchainKHR swapchain, VkS
     // Only a successful call through our bound raw CreateSwapchain hook can register an output.
     if (!deviceIt->second.verifiedWsi || swapchain == VK_NULL_HANDLE || surface == VK_NULL_HANDLE)
         return;
-    deviceIt->second.swapchains[HandleKey(swapchain)] = { surface, false, {} };
+    deviceIt->second.swapchains[HandleKey(swapchain)] = { surface, false };
 }
 
 bool VulkanHooks::ConfirmSwapchainImages(VkDevice device, VkSwapchainKHR swapchain, const VkImage* images,
@@ -345,7 +341,6 @@ bool VulkanHooks::ConfirmSwapchainImages(VkDevice device, VkSwapchainKHR swapcha
     for (uint32_t i = 0; i < count; ++i)
         if (images[i] == VK_NULL_HANDLE || std::find(images, images + i, images[i]) != images + i)
             return false;
-    state.images.assign(images, images + count);
     state.verifiedWsi = true;
     return true;
 }
@@ -673,11 +668,7 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
     DlssNr::FinishedVkPresent(queue, &localPresentInfo);
 
     // render menu if needed
-    if (!MenuOverlayVk::QueuePresent(queue, &localPresentInfo))
-    {
-        LOG_ERROR("QueuePresent: false!");
-        return VK_ERROR_OUT_OF_DATE_KHR;
-    }
+    MenuOverlayVk::QueuePresent(queue, &localPresentInfo);
 
     ReflexHooks::update(false, true);
 

@@ -11,7 +11,6 @@ class VulkanHooks
         uint32_t familyIndex = UINT32_MAX;
         uint32_t queueIndex = UINT32_MAX;
         VkQueueFlags flags = 0;
-        bool protectedQueue = false;
     };
 
     static PFN_vkCreateSemaphore o_vkCreateSemaphore;

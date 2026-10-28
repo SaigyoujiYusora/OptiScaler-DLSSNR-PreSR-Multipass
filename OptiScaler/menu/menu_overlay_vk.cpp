@@ -32,6 +32,7 @@ static uint32_t _overlayQueueFamily = UINT32_MAX;
 static VkSwapchainKHR _overlaySwapchain = VK_NULL_HANDLE;
 static VkDevice _overlayDevice = VK_NULL_HANDLE;
 static bool _overlayFaulted = false;
+static VkSwapchainCreateInfoKHR _overlayCreateInfo = {};
 static ULONG64 _frameCount;
 
 MenuOverlayVk::PresentScope::PresentScope() { _vkPresentMutex.lock(); }
@@ -56,7 +57,8 @@ static void SetVkObjectName(VkDevice device, VkInstance instance, VkObjectType o
 }
 
 static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance instance, HWND hwnd,
-                                const VkSwapchainCreateInfoKHR* pCreateInfo, VkSwapchainKHR* pSwapchain)
+                                const VkSwapchainCreateInfoKHR* pCreateInfo, VkSwapchainKHR* pSwapchain,
+                                const VulkanHooks::QueueInfo* preferredQueue = nullptr)
 {
     LOG_FUNC();
 
@@ -94,7 +96,9 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     VkResult result;
 
     VulkanHooks::QueueInfo queueInfo {};
-    if (!VulkanHooks::GetGraphicsQueue(device, queueInfo))
+    if (preferredQueue != nullptr)
+        queueInfo = *preferredQueue;
+    else if (!VulkanHooks::GetGraphicsQueue(device, queueInfo))
     {
         LOG_WARN("Vulkan overlay: no created non-protected graphics queue was recorded");
         return;
@@ -480,6 +484,12 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
     }
 
     _vulkanObjectsCreated = true;
+    _overlayCreateInfo = {};
+    _overlayCreateInfo.sType = pCreateInfo->sType;
+    _overlayCreateInfo.imageFormat = pCreateInfo->imageFormat;
+    _overlayCreateInfo.imageExtent = pCreateInfo->imageExtent;
+    _overlayCreateInfo.imageUsage = pCreateInfo->imageUsage;
+    _overlayCreateInfo.minImageCount = pCreateInfo->minImageCount;
     State::Instance().menuOverlayIsVulkan = true;
     LOG_FUNC_RESULT(_vulkanObjectsCreated);
 }
@@ -495,6 +505,7 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
         _overlayQueueFamily = UINT32_MAX;
         _overlaySwapchain = VK_NULL_HANDLE;
         _overlayDevice = VK_NULL_HANDLE;
+        _overlayCreateInfo = {};
         _scImageCount = 0;
         _ImVulkan_Info = {};
         _isInited = false;
@@ -583,6 +594,7 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
     _overlayQueueFamily = UINT32_MAX;
     _overlaySwapchain = VK_NULL_HANDLE;
     _overlayDevice = VK_NULL_HANDLE;
+    _overlayCreateInfo = {};
     _scImageCount = 0;
     _frameCount = 0;
     _isInited = false;
@@ -597,43 +609,69 @@ void MenuOverlayVk::DestroySwapchain(VkDevice device, VkSwapchainKHR swapchain)
     DestroyVulkanObjects(false);
 }
 
-bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
+static bool RebindVulkanObjectsForQueue(const VulkanHooks::QueueInfo& queueInfo)
+{
+    const auto createInfo = _overlayCreateInfo;
+    const auto swapchain = _overlaySwapchain;
+    const auto device = _overlayDevice;
+    const auto physicalDevice = _ImVulkan_Info.PhysicalDevice;
+    const auto instance = _ImVulkan_Info.Instance;
+    const auto hwnd = MenuOverlayBase::Handle();
+    MenuOverlayVk::DestroyVulkanObjects(false);
+    auto recreateSwapchain = swapchain;
+    CreateVulkanObjects(device, physicalDevice, instance, hwnd, &createInfo, &recreateSwapchain, &queueInfo);
+    return _vulkanObjectsCreated && _overlayQueueFamily == queueInfo.familyIndex;
+}
+
+void MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 {
     LOG_FUNC();
 
     std::lock_guard lock(_vkPresentMutex);
 
     if (!_vulkanObjectsCreated)
-        return true;
+        return;
 
     if (!MenuOverlayBase::IsInited() || _ImVulkan_Info.Device == VK_NULL_HANDLE)
-        return true;
+        return;
 
     if (pPresentInfo == nullptr || pPresentInfo->swapchainCount != 1 || pPresentInfo->pSwapchains == nullptr ||
         pPresentInfo->pImageIndices == nullptr)
-        return true;
+        return;
 
     if (_overlayFaulted || pPresentInfo->pSwapchains[0] != _overlaySwapchain)
-        return true;
+        return;
 
     const uint32_t imageIndex = pPresentInfo->pImageIndices[0];
     if (imageIndex >= _scImageCount || _ImVulkan_Frames == nullptr || _ImVulkan_Semaphores == nullptr)
-        return true;
+        return;
 
     VulkanHooks::QueueInfo presentQueueInfo {};
     bool verifiedWsi = false;
     if (!VulkanHooks::GetPresentQueue(_ImVulkan_Info.Device, queue, _overlaySwapchain, presentQueueInfo,
-                                      &verifiedWsi) ||
-        presentQueueInfo.familyIndex != _overlayQueueFamily)
+                                      &verifiedWsi))
     {
         LOG_DEBUG("Vulkan overlay: present queue/swapchain identity is not compatible; skipping overlay");
-        return true;
+        return;
+    }
+
+    if (presentQueueInfo.familyIndex != _overlayQueueFamily)
+    {
+        // Command pools and the ImGui backend are family-specific. Rebuild once using the
+        // queue that actually presented this swapchain instead of dropping every frame.
+        if (!RebindVulkanObjectsForQueue(presentQueueInfo))
+        {
+            LOG_DEBUG("Vulkan overlay: present queue family rebind failed; skipping overlay");
+            return;
+        }
+        if (imageIndex >= _scImageCount || _ImVulkan_Frames == nullptr || _ImVulkan_Semaphores == nullptr)
+            return;
     }
 
     if (!ImGui_ImplVulkan_SetPresentQueue(queue, presentQueueInfo.familyIndex))
     {
         LOG_DEBUG("Vulkan overlay: ImGui backend rejected present queue family; skipping overlay");
-        return true;
+        return;
     }
 
     LOG_DEBUG("rendering menu, swapchain count: {0}", pPresentInfo->swapchainCount);
@@ -654,7 +692,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     // the swapchain image. A failed FG pause must not race the overlay's GPU submission.
     const bool nativeFgAllowsOverlay = StreamlineHooks::SyncNativeVulkanDlssgMenu(renderMenu, verifiedWsi);
     if (!renderMenu)
-        return true;
+        return;
 
     // Close the ImGui frame before any error path can return. The GPU submission below may still
     // be skipped, but the next NewFrame must never observe an unrendered frame.
@@ -675,7 +713,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
         }
     }
     if ((State::Instance().delayMenuRenderBy != 0 && !verifiedPassiveBoundary) || !nativeFgAllowsOverlay)
-        return true;
+        return;
 
     ImGui_ImplVulkanH_Frame* fd = &_ImVulkan_Frames[imageIndex];
     auto result = vkWaitForFences(_ImVulkan_Info.Device, 1, &fd->Fence, VK_TRUE, UINT64_MAX);
@@ -683,7 +721,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     {
         LOG_ERROR("Vulkan overlay: vkWaitForFences failed: {0:X}", (UINT) result);
         _overlayFaulted = true;
-        return true;
+        return;
     }
 
     result = vkResetFences(_ImVulkan_Info.Device, 1, &fd->Fence);
@@ -691,7 +729,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     {
         LOG_ERROR("Vulkan overlay: vkResetFences failed: {0:X}", (UINT) result);
         _overlayFaulted = true;
-        return true;
+        return;
     }
 
     result = vkResetCommandPool(_ImVulkan_Info.Device, fd->CommandPool, 0);
@@ -699,7 +737,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     {
         LOG_ERROR("Vulkan overlay: vkResetCommandPool failed: {0:X}", (UINT) result);
         _overlayFaulted = true;
-        return true;
+        return;
     }
 
     VkCommandBufferBeginInfo beginInfo {};
@@ -710,7 +748,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     {
         LOG_ERROR("Vulkan overlay: vkBeginCommandBuffer failed: {0:X}", (UINT) result);
         _overlayFaulted = true;
-        return true;
+        return;
     }
 
     VkRenderPassBeginInfo renderPassInfo {};
@@ -729,14 +767,14 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     {
         LOG_ERROR("Vulkan overlay: vkEndCommandBuffer failed: {0:X}", (UINT) result);
         _overlayFaulted = true;
-        return true;
+        return;
     }
 
     if (pPresentInfo->waitSemaphoreCount != 0 && pPresentInfo->pWaitSemaphores == nullptr)
     {
         LOG_ERROR("Vulkan overlay: present reported wait semaphores without an array");
         _overlayFaulted = true;
-        return true;
+        return;
     }
 
     std::vector<VkPipelineStageFlags> waitStages(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
@@ -755,7 +793,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
     {
         LOG_ERROR("Vulkan overlay: vkQueueSubmit failed: {0:X}; disabling until swapchain recreation", (UINT) result);
         _overlayFaulted = true;
-        return true;
+        return;
     }
 
     // Only replace the application's present wait list after the overlay submit succeeded.
@@ -772,7 +810,6 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
         }
     }
 
-    return true;
 }
 
 void MenuOverlayVk::CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInstance instance, HWND hwnd,

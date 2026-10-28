@@ -28,8 +28,11 @@ function Extract($path, $signature) {
     throw "Unterminated production function: $signature"
 }
 
-Set-Content -LiteralPath "$out/native_vulkan_overlay_production.inc" `
-    -Value (Extract 'OptiScaler/menu/menu_overlay_vk.cpp' 'bool MenuOverlayVk::QueuePresent(')
+$overlayProduction = @(
+    Extract 'OptiScaler/menu/menu_overlay_vk.cpp' 'static bool RebindVulkanObjectsForQueue('
+    Extract 'OptiScaler/menu/menu_overlay_vk.cpp' 'void MenuOverlayVk::QueuePresent('
+) -join "`n"
+Set-Content -LiteralPath "$out/native_vulkan_overlay_production.inc" -Value $overlayProduction
 Set-Content -LiteralPath "$out/imgui_present_queue_production.inc" `
     -Value (Extract 'OptiScaler/include/imgui/imgui_impl_vulkan.cpp' 'bool ImGui_ImplVulkan_SetPresentQueue(')
 $wsiSource = 'OptiScaler/hooks/Vulkan_Hooks.cpp'

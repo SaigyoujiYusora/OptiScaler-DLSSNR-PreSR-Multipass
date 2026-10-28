@@ -30,7 +30,6 @@ public:
         VkQueue queue = VK_NULL_HANDLE;
         uint32_t familyIndex = UINT32_MAX, queueIndex = UINT32_MAX;
         VkQueueFlags flags = 0;
-        bool protectedQueue = false;
     };
     static bool GetGraphicsQueue(VkDevice, QueueInfo&);
     static bool GetDeviceContext(VkDevice,VkPhysicalDevice&,VkInstance&);
@@ -87,7 +86,7 @@ void AddDevice(uintptr_t id,bool native=true) {
     state.nativeLoaderChain = native;
     state.getSurfaceSupport = SurfaceSupport;
     auto queue = Handle<VkQueue>(id+0x1000);
-    state.queues.emplace(id+0x1000,VulkanHooks::QueueInfo{queue,0,0,VK_QUEUE_GRAPHICS_BIT,false});
+    state.queues.emplace(id+0x1000,VulkanHooks::QueueInfo{queue,0,0,VK_QUEUE_GRAPHICS_BIT});
     deviceStates[id] = std::move(state);
 }
 void Reset() {

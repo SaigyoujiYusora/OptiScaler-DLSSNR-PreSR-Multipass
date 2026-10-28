@@ -18,6 +18,6 @@ void CreateSwapchain(VkDevice device, VkPhysicalDevice pd, VkInstance instance, 
                      const VkSwapchainCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator,
                      VkSwapchainKHR* pSwapchain);
 void DestroySwapchain(VkDevice device, VkSwapchainKHR swapchain);
-bool QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo);
+void QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo);
 void DestroyVulkanObjects(bool shutdown);
 } // namespace MenuOverlayVk
